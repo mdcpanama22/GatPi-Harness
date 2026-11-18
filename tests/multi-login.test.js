@@ -412,6 +412,17 @@ globalThis.fetch = async () => { throw new Error("multi-login test attempted an 
   assert.match(brokenCtx.notices[0][0], /Could not switch to anthropic-account-2\/claude-opus-5-5/);
   assert.ok(new CooldownStore(path.join(agentDir, "multi-login-state.json")).read().anthropic > Date.now(), "the failed account is still cooled down");
 
+  // A quota/billing error must still produce a retryable message: Pi's non-retryable
+  // patterns run before its retry patterns, so the original text is not echoed.
+  new CooldownStore(path.join(agentDir, "multi-login-state.json")).clear();
+  const billingCtx = context(path.join(agentDir, "billing-project"));
+  const billing = loadExtension(billingCtx);
+  const billingResult = await billing.handlers.get("message_end")(failure("anthropic", "billing_hard_limit_reached"), billingCtx);
+  assert.ok(billingResult, "billing exhaustion fails over");
+  assert.match(billingResult.message.errorMessage, /rate limit retry/);
+  assert.doesNotMatch(billingResult.message.errorMessage, /billing/i, "do not echo a non-retryable original");
+  assert.match(billingCtx.notices[0][0], /billing_hard_limit_reached/, "the user still sees the original reason");
+
   async function start(ctx, reason = "startup") {
     const instance = loadExtension(ctx);
     await instance.handlers.get("session_start")({ reason }, ctx);

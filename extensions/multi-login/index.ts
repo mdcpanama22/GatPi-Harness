@@ -110,10 +110,15 @@ export default function multiLogin(pi: ExtensionAPI) {
     ctx.ui?.notify?.(`${unavailable} Switched to ${next.ref}.`, "warning");
     // Pi retries only errors it classifies as transient, and retries on the session model.
     // Restate the failure as a rate limit so the turn is retried on the model just selected.
+    // Pi checks its non-retryable quota/billing patterns first, so echoing an original
+    // "billing" or "quota exceeded" text would suppress the retry. The notice above
+    // already showed the original reason.
+    const NON_RETRYABLE_ECHO = /insufficient_quota|out of budget|quota exceeded|billing|subscription_sharing_(?:workplace_)?individual_usage_limit_exceeded|GoUsageLimitError|FreeUsageLimitError|Monthly usage limit reached|available balance|"code"\s*:\s*"?1308/i;
+    const reason = NON_RETRYABLE_ECHO.test(message.errorMessage) ? "" : `: ${message.errorMessage}`;
     return {
       message: {
         ...message,
-        errorMessage: `multi-login: account unavailable; retrying on ${next.ref} (rate limit retry): ${message.errorMessage}`,
+        errorMessage: `multi-login: account unavailable; retrying on ${next.ref} (rate limit retry)${reason}`,
       },
     };
   });
