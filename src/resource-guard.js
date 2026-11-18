@@ -15,6 +15,7 @@ const DEFAULT_RSS_LIMIT_MB = 6 * 1024;
 // A Windows process snapshot costs ~0.5 s, so poll less often there.
 const DEFAULT_RSS_POLL_MS = winTree ? 5_000 : 2_000;
 const DEFAULT_TERM_GRACE_MS = 5_000;
+const WINDOWS_POLITE_GRACE_MS = 1_000;
 const OWNED_GROUP = Symbol("pi-harness-owned-process-group");
 
 function positiveInteger(value, fallback, minimum = 1) {
@@ -176,28 +177,42 @@ async function terminateOwnedProcessGroup(ownership, options = {}) {
     // kept in the result for compatibility with the POSIX evidence format.
     // termSent reports the request, as on POSIX; console programs usually refuse
     // a polite taskkill, which is what the grace period and /F escalation are for.
-    const members = windowsTree(pgid).map((item) => item.pid);
-    if (members.length) { winTree.killProcesses(members, { force: false }); termSent = true; signals.push("SIGTERM"); }
-    const deadline = Date.now() + graceMs;
-    while (processGroupAlive(pgid) && Date.now() < deadline) await waitDelay(Math.min(pollMs, Math.max(1, deadline - Date.now())));
-    if (processGroupAlive(pgid)) {
-      winTree.killProcesses(windowsTree(pgid).map((item) => item.pid), { force: true });
+    // Snapshots are asynchronous: this also runs inside Pi (subagents).
+    const tree = async () => windowsTree(pgid, await winTree.snapshotAsync()).map((item) => item.pid);
+    let members = await tree();
+    // Nothing left (the command exited by itself): done. Late children only
+    // arise when a parent is killed mid-spawn, so no sweep is needed.
+    if (!members.length) return { processGroupId: pgid, termSent, killSent, signals, exited: true, graceMs };
+    winTree.killProcesses(members, { force: false }); termSent = true; signals.push("SIGTERM");
+    // A polite taskkill only reaches processes with a window; hidden console
+    // processes (all managed commands) never see it, unlike SIGTERM on POSIX.
+    // Waiting the full grace would only delay /F, so the wait is capped.
+    const deadline = Date.now() + Math.min(graceMs, WINDOWS_POLITE_GRACE_MS);
+    while (members.length && Date.now() < deadline) {
+      await waitDelay(Math.min(pollMs, Math.max(1, deadline - Date.now())));
+      members = await tree();
+    }
+    if (members.length) {
+      winTree.killProcesses(members, { force: true });
       killSent = true;
       signals.push("SIGKILL");
     }
     const killDeadline = Date.now() + Math.max(500, pollMs * 4);
-    while (processGroupAlive(pgid) && Date.now() < killDeadline) await waitDelay(pollMs);
+    while (members.length && Date.now() < killDeadline) { await waitDelay(pollMs); members = await tree(); }
     // A member that was mid-CreateProcess when its parent died appears only
     // after the tree looked empty (POSIX groups don't have this gap). Sweep
     // twice more so a late child is never left orphaned.
+    let late = [];
     for (let sweep = 0; sweep < 2; sweep++) {
       await waitDelay(300);
-      const late = windowsTree(pgid).map((item) => item.pid);
+      late = await tree();
       if (!late.length) continue;
       winTree.killProcesses(late, { force: true });
       if (!killSent) { killSent = true; signals.push("SIGKILL"); }
     }
-    return { processGroupId: pgid, termSent, killSent, signals, exited: !processGroupAlive(pgid), graceMs };
+    // The last sweep's snapshot answers "exited" unless it had to kill something.
+    const exited = late.length ? !(await tree()).length : true;
+    return { processGroupId: pgid, termSent, killSent, signals, exited, graceMs };
   }
   try { process.kill(-pgid, "SIGTERM"); termSent = true; signals.push("SIGTERM"); } catch {}
   const deadline = Date.now() + graceMs;

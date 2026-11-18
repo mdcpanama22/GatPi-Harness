@@ -109,6 +109,7 @@ process.stdin.on("data", (chunk) => {
       else if (scenario === "tools") for (let i = 0; i < 3; i++) emit({ type: "tool_execution_start", toolCallId: "tool-" + i, toolName: "read", args: {} });
       else if (scenario === "output") emit({ type: "message_update", message: { role: "assistant" }, assistantMessageEvent: { type: "text_delta", delta: "123456789012345678901" } });
       else if (scenario === "delayed") setTimeout(() => emit({ type: "agent_end", messages, willRetry: false }), 180);
+      else if (scenario === "slow") setTimeout(() => emit({ type: "agent_end", messages, willRetry: false }), 4000);
     } else if (message.type === "get_state") emit({ type: "response", id: message.id, command: "get_state", success: true, data: { sessionFile: "/tmp/synthetic-budget-session.jsonl", isStreaming: false } });
     else if (message.type === "get_messages") emit({ type: "response", id: message.id, command: "get_messages", success: true, data: { messages } });
     else if (message.type === "abort") emit({ type: "response", command: "abort", success: true });
@@ -138,7 +139,10 @@ process.stdin.on("data", (chunk) => {
   assert.equal(launchFailure.status, "failed");
   assert.equal(launchFailure.termination.code, "rpc_launch");
 
-  const rssLimitedSub = service.createSubagent({ parentSessionId: "rss-limited", parentBranchId: parent.id, task: "rss-limited", budget: { wallClockMs: 1_000, maxQueueWaitMs: 1_000 } });
+  // A Windows RSS sample is a process snapshot (~0.5 s), so the guard there
+  // needs a child that outlives one sample; POSIX samples every 10 ms.
+  const rssWindowMs = process.platform === "win32" ? 6_000 : 1_000;
+  const rssLimitedSub = service.createSubagent({ parentSessionId: "rss-limited", parentBranchId: parent.id, task: "rss-limited", budget: { wallClockMs: rssWindowMs, maxQueueWaitMs: 1_000 } });
   const rssLimited = await service.runSubagent({
     subagentId: rssLimitedSub.id,
     context: {
@@ -146,8 +150,8 @@ process.stdin.on("data", (chunk) => {
       cwd: tmp,
       rpc: {
         command: process.execPath,
-        argsPrefix: [fakeRpc, "delayed"],
-        timeoutMs: 1_000,
+        argsPrefix: [fakeRpc, process.platform === "win32" ? "slow" : "delayed"],
+        timeoutMs: rssWindowMs,
         resourceGuard: { rssLimitMb: 1, rssPollMs: 10, termGraceMs: 30 },
       },
     },

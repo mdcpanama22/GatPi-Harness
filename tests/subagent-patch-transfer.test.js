@@ -124,7 +124,9 @@ function proposed(cwd, id = "sub_patch") { const manager = new SubagentWorkspace
     assert.equal(fs.readlinkSync(path.join(cwd, "loose-link")), "app.txt");
     assert.equal(fs.readFileSync(path.join(cwd, ".env"), "utf8"), "fixture-only-private\n");
   }
-  {
+  // Executable-bit transfer: Windows has no executable bit (Git runs with
+  // core.filemode=false there), so this case is POSIX-only.
+  if (process.platform !== "win32") {
     const cwd = repo(), manager = new SubagentWorkspaceManager({ cwd });
     const lease = manager.acquire({ subagentId: "exec-mode", parentSessionId: "fixture", task: "Propose an executable-bit change" });
     fs.chmodSync(path.join(lease.cwd, "app.txt"), 0o755);

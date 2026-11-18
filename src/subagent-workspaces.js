@@ -50,8 +50,12 @@ function writePrivateJson(file, value) { writePrivateBuffer(file, `${JSON.string
 function readPrivateFile(file) { const opened = openWorkspaceState(file, "file"); try { const value = fs.readFileSync(opened.fd); assertWorkspaceStateIdentity(file, opened.opened, "file"); return value; } finally { fs.closeSync(opened.fd); } }
 function readPrivateJson(file) { return JSON.parse(readPrivateFile(file).toString("utf8")); }
 function gitEnv(extra = {}) { return { ...process.env, GIT_AUTHOR_NAME: "Pi Role Runtime", GIT_AUTHOR_EMAIL: "role-runtime@localhost.invalid", GIT_COMMITTER_NAME: "Pi Role Runtime", GIT_COMMITTER_EMAIL: "role-runtime@localhost.invalid", ...extra }; }
+// Workspaces, captured patches and their application compare exact file bytes.
+// Git for Windows defaults to core.autocrlf=true, which rewrites LF files as CRLF
+// on checkout and apply, so a patch could never match its captured candidate.
+const GIT_BYTE_EXACT_ARGS = process.platform === "win32" ? ["-c", "core.autocrlf=false"] : [];
 function git(root, args, { input, encoding = "utf8", env = {} } = {}) {
-  try { return execFileSync("git", args, { cwd: root, input, encoding, maxBuffer: 64 * 1024 * 1024, env: gitEnv(env), stdio: ["pipe", "pipe", "pipe"] }); }
+  try { return execFileSync("git", [...GIT_BYTE_EXACT_ARGS, ...args], { cwd: root, input, encoding, maxBuffer: 64 * 1024 * 1024, env: gitEnv(env), stdio: ["pipe", "pipe", "pipe"] }); }
   catch (error) {
     const wrapped = new Error(`git ${args.join(" ")} failed: ${String(error?.stderr || error?.message || error).trim()}`);
     wrapped.code = "SUBAGENT_WORKSPACE_GIT_FAILED";
@@ -367,6 +371,7 @@ class SubagentWorkspaceManager {
 }
 
 module.exports = {
+  GIT_BYTE_EXACT_ARGS,
   DEFAULT_MAX_UNTRACKED_FILES,
   DEFAULT_MAX_UNTRACKED_BYTES,
   DEFAULT_MAX_PATCH_BYTES,

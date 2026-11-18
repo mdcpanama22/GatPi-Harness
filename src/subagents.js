@@ -32,6 +32,7 @@ const { containmentProbe } = require("./specialist-tools");
 const { resolveRoleRuntimeConfig, assertRoleRuntimeExecutionAllowed } = require("./role-runtime-rollout");
 const { SKILL_AWARENESS_MARKER, skillAwarenessPrompt } = require("./skill-awareness");
 const { processIdentity } = require("./resource-guard");
+const { resolveSpawn } = require("./win-exec.js");
 const { roleRevision, publicRecord, publicResult, publicEvent, resolveSubagentPreflight, createSubagentReceipt, sha256: lifecycleSha256 } = require("./subagent-lifecycle");
 const {
   ownProcessGroup,
@@ -536,7 +537,11 @@ class SubagentRunner {
     const roleSidecar = path.resolve(__dirname, "..", "extensions", "role-sidecar", "index.ts");
     // Approved provider registration is needed even with discovery disabled.
     // Multi-login detects child execution and omits model-changing session hooks.
-    args.push("--no-extensions", "-e", path.resolve(__dirname, "..", "extensions", "multi-login", "index.ts"));
+    // An install without multi-login (GatPi Desktop ships without it) must not
+    // pass a missing extension path, which would fail every child at startup.
+    const multiLogin = path.resolve(__dirname, "..", "extensions", "multi-login", "index.ts");
+    args.push("--no-extensions");
+    if (fs.existsSync(multiLogin)) args.push("-e", multiLogin);
     if (roleContract) args.push("-e", roleSidecar);
     // --no-extensions also disables pi's built-in MCP client, so a contract that
     // allowlists MCP tools must load that built-in explicitly or every matching
@@ -567,9 +572,14 @@ class SubagentRunner {
       PI_ROLE_EXPECTED_MODEL: inferenceProfile.selectedModel,
       PI_ROLE_EXPECTED_THINKING_LEVEL: inferenceProfile.selectedThinkingLevel,
     } : {};
+    // Windows: without an explicit command, children run on this Pi's own
+    // runtime (node or Electron-as-node, plus its CLI script). A bundled Pi, as
+    // in GatPi Desktop, has no `pi` on PATH, and a global one may differ in version.
+    const explicitCommand = rpc.command || process.env.PI_SUBAGENT_RPC_COMMAND;
+    const ownRuntime = !explicitCommand && process.platform === "win32" && Boolean(process.argv[1]) && fs.existsSync(process.argv[1]);
     return {
-      command: rpc.command || process.env.PI_SUBAGENT_RPC_COMMAND || "pi",
-      args,
+      command: explicitCommand || (ownRuntime ? process.execPath : "pi"),
+      args: ownRuntime ? [process.argv[1], ...args] : args,
       cwd,
       sessionDir,
       noSession,
@@ -623,11 +633,17 @@ class SubagentRunner {
     const launchArgs = taskContained ? ["--die-with-parent", "--unshare-pid", "--new-session", "--bind", "/", "/", "--proc", "/proc", "--dev-bind", "/dev/null", "/dev/null", "--chdir", cwd, "--", command, ...args] : args;
     const worker = taskRpc ? await acquireManagedWorker() : null;
     let child;
-    try { child = spawn(executable, launchArgs, { cwd, env: { ...env, ...worker?.environment }, detached: true, stdio: ["pipe", "pipe", "pipe"] }); }
+    try {
+      const childEnv = { ...env, ...worker?.environment };
+      // Windows: `pi` from npm is pi.cmd, which needs cmd.exe (resolveSpawn quotes it).
+      const spawnable = resolveSpawn(executable, launchArgs, childEnv);
+      child = spawn(spawnable.command, spawnable.args, { cwd, env: childEnv, detached: true, stdio: ["pipe", "pipe", "pipe"], windowsHide: true, ...spawnable.options });
+    }
     catch (error) { await worker?.release(); throw error; }
     let ownership;
     try {
-      ownership = ownProcessGroup(child);
+      // snapshot: false keeps the blocking Windows process snapshot off Pi's event loop.
+      ownership = ownProcessGroup(child, { snapshot: false });
       context.onProcessSpawn?.({ subagentId: record.id, processGroupId: ownership.processGroupId, startTime: ownership.startTime });
     } catch (cause) {
       try { if (ownership) await terminateOwnedProcessGroup(ownership, { graceMs: guardConfig.termGraceMs }); }

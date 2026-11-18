@@ -5,7 +5,7 @@ const fs = require("node:fs");
 const { hardenFd } = require("./private-fs.js");
 const path = require("node:path");
 const { execFileSync } = require("node:child_process");
-const { repositoryRoot, repositoryFingerprint, sameFingerprint, assertSafeRelative, pathForbidden } = require("./subagent-workspaces");
+const { repositoryRoot, repositoryFingerprint, sameFingerprint, assertSafeRelative, pathForbidden, GIT_BYTE_EXACT_ARGS } = require("./subagent-workspaces");
 const { acquireManagedWorker } = require("./resource-guard");
 
 function sha256(value) { return crypto.createHash("sha256").update(value).digest("hex"); }
@@ -37,7 +37,7 @@ function writePrivateJson(file, value) {
 function readPrivateFile(file) { const opened = openPatchState(file, "file"); try { const value = fs.readFileSync(opened.fd); assertPatchStateIdentity(file, opened.opened, "file"); return { value, stat: opened.opened }; } finally { fs.closeSync(opened.fd); } }
 function error(code, message, details) { const value = new Error(message); value.code = code; if (details) value.details = details; return value; }
 function git(root, args, { input } = {}) {
-  try { return execFileSync("git", args, { cwd: root, input, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }).trim(); }
+  try { return execFileSync("git", [...GIT_BYTE_EXACT_ARGS, ...args], { cwd: root, input, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }).trim(); }
   catch (cause) { throw error("SUBAGENT_PATCH_CONFLICT", `git ${args.join(" ")} failed: ${String(cause?.stderr || cause?.message || cause).trim()}`); }
 }
 function backupPath(root, relative, maxBytes) {

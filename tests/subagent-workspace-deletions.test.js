@@ -32,7 +32,8 @@ for (const operation of ["delete", "rename"]) test(`${operation} proposals seed 
     assert.equal(fs.existsSync(path.join(review.cwd, "old.sh")), false);
     if (operation === "rename") {
       assert.equal(fs.readFileSync(path.join(review.cwd, "new.sh"), "utf8"), fs.readFileSync(path.join(cwd, "old.sh"), "utf8"));
-      assert.equal(fs.statSync(path.join(review.cwd, "new.sh")).mode & 0o100, 0o100);
+      // Windows has no executable bit to carry over.
+      if (process.platform !== "win32") assert.equal(fs.statSync(path.join(review.cwd, "new.sh")).mode & 0o100, 0o100);
     }
     const reviewed = manager.capture(review, { status: "succeeded" });
     assert.equal(reviewed.patchHash, proposal.patchHash, "review preserves the deletion/rename patch exactly");
