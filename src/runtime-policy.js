@@ -3,15 +3,21 @@
 const path = require("node:path");
 
 const { DEFAULT_DENY_SHELL, DEFAULT_WARN_SHELL, evaluateShellCommand } = require("./shell-policy");
+const { homeDir, fromGitBashPath, windowsDenyPathPrefixes, evaluatePowerShellCommand } = require("./windows-policy");
 const DEFAULT_ALLOW_TOOLS = [
-  "read", "bash", "edit", "write", "grep", "find", "ls",
+  "read", "bash", "powershell", "edit", "write", "grep", "find", "ls",
   "verification_center", "runtime_doctor", "session_stabilizer",
   "privacy_guard", "memory_explorer", "project_profiler", "test_gap_planner", "memory_curator",
   "policy_gate", "performance_optimizer", "ci_pr_companion", "create_subagent", "run_topology",
   "skill_synthesis", "project_intelligence", "evidence_binder", "extension_ops",
   "output_compactor", "policy_enforcer", "learning_loop", "automation_loop",
 ];
-const DEFAULT_DENY_PATH_PREFIXES = ["/etc", "/usr", "/bin", "/sbin", "/var", process.env.HOME ? `${process.env.HOME}/.ssh` : "~/.ssh"];
+// homeDir() falls back to os.homedir() because HOME is usually unset on Windows;
+// win32 adds the Windows system folders (the counterpart of /etc, /usr, ...).
+const DEFAULT_DENY_PATH_PREFIXES = [
+  "/etc", "/usr", "/bin", "/sbin", "/var", path.join(homeDir(), ".ssh"),
+  ...(process.platform === "win32" ? windowsDenyPathPrefixes() : []),
+];
 
 function normalizePolicy(policy = {}) {
   return {
@@ -38,11 +44,11 @@ function classifyRequest(input = {}) {
 }
 function normalizePathValue(value) {
   if (typeof value !== "string") return value;
-  let out = value.replace(/^@/, "");
+  let out = fromGitBashPath(value.replace(/^@/, ""));
   // Only expand the current user's home shorthand.  Do not interpret
   // ~otheruser/...; Node has no cross-platform user-home resolver for that.
-  if (out === "~") return process.env.HOME || out;
-  if (out.startsWith("~/")) return process.env.HOME ? path.join(process.env.HOME, out.slice(2)) : out;
+  if (out === "~") return homeDir();
+  if (out.startsWith("~/")) return path.join(homeDir(), out.slice(2));
   return out;
 }
 function resolveMaybeHome(value) { return normalizePathValue(String(value || "")); }
@@ -63,12 +69,15 @@ function evaluatePolicy(input, { cwd = process.cwd(), policy = {}, mode = "advis
   function deny(code, reason) { severity = "deny"; denialCodes.push(code); reasons.push(reason); }
   if (x.tool && !(p.allowTools || []).includes(x.tool)) warn(`tool not explicitly allowlisted: ${x.tool}`);
   if (x.command) {
-    const shell = evaluateShellCommand(x.command, {
-      cwd,
-      denyPathPrefixes: p.denyPathPrefixes,
-      customDenyShell: samePatternList(p.denyShell, DEFAULT_DENY_SHELL) ? [] : p.denyShell,
-      customWarnShell: samePatternList(p.warnShell, DEFAULT_WARN_SHELL) ? [] : p.warnShell,
-    });
+    // The optional powershell tool's commands follow PowerShell rules, not bash.
+    const shell = x.kind === "powershell"
+      ? evaluatePowerShellCommand(x.command, { cwd, denyPathPrefixes: p.denyPathPrefixes })
+      : evaluateShellCommand(x.command, {
+        cwd,
+        denyPathPrefixes: p.denyPathPrefixes,
+        customDenyShell: samePatternList(p.denyShell, DEFAULT_DENY_SHELL) ? [] : p.denyShell,
+        customWarnShell: samePatternList(p.warnShell, DEFAULT_WARN_SHELL) ? [] : p.warnShell,
+      });
     for (const item of shell.denials) deny(item.code, item.reason);
     for (const item of shell.warnings) warn(item.reason);
   }

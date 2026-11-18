@@ -28,6 +28,11 @@ function toolRequests(toolName, input = {}) {
     const command = input.command || input.text || input.args;
     if (command) requests.push({ kind: "shell", command });
   }
+  // Pi's optional Windows powershell tool: check the command, not just the tool name.
+  if (toolName === "powershell") {
+    const command = input.command || input.script;
+    if (command) requests.push({ kind: "powershell", command });
+  }
   const addPath = (p, kind = "path") => { if (typeof p === "string" && p.trim()) requests.push({ kind, path: normalizePathArg(p) }); };
   if (toolName === "read") addPath(input.path, "read");
   if (toolName === "write") addPath(input.path, "write");

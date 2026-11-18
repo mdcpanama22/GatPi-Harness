@@ -6,6 +6,7 @@
 // substitutions, and redirects still do.
 
 const path = require("node:path");
+const { homeDir, fromGitBashPath, evaluatePowerShellCommand, nestedWindowsCommand } = require("./windows-policy");
 
 const DEFAULT_DENY_SHELL = [
   /\brm\s+-[^\n]*r[f]?\b|\brm\s+-[^\n]*f[^\n]*r\b|\brm\s+-rf\b/i,
@@ -251,14 +252,19 @@ function packageInstallWarning(bin, args) {
   if (["apt", "apt-get"].includes(bin) && args[0] === "install") return true;
   return false;
 }
+function expandHomeAndDrive(value) {
+  // homeDir() covers Windows, where HOME is usually unset; fromGitBashPath maps
+  // Git Bash /c/... spellings to C:\... on win32 (a no-op elsewhere).
+  const home = homeDir();
+  const expanded = value === "~" ? home : value.startsWith("~/") ? path.join(home, value.slice(2)) : value;
+  return fromGitBashPath(expanded);
+}
 function isDeniedPath(target, cwd, denyPathPrefixes) {
   if (typeof target !== "string" || !target || target === "-") return null;
   if (/^&?\d+$/.test(target)) return null;
-  const normalized = target === "~" ? (process.env.HOME || target) : target.startsWith("~/") && process.env.HOME ? path.join(process.env.HOME, target.slice(2)) : target;
-  const absolute = path.resolve(cwd, normalized);
+  const absolute = path.resolve(cwd, expandHomeAndDrive(target));
   for (const prefix of denyPathPrefixes || []) {
-    const homeExpanded = prefix === "~" ? (process.env.HOME || prefix) : prefix.startsWith("~/") && process.env.HOME ? path.join(process.env.HOME, prefix.slice(2)) : prefix;
-    const root = path.resolve(homeExpanded);
+    const root = path.resolve(expandHomeAndDrive(prefix));
     const relative = path.relative(root, absolute);
     if (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)) return prefix;
   }
@@ -357,6 +363,13 @@ function evaluateShellCommand(command, { cwd = process.cwd(), denyPathPrefixes =
       if (piped || item.redirects.length) deny("denied-shell", `denied ${bin} pipeline/redirect`);
     }
     if (packageInstallWarning(bin, args)) warn(`approval recommended for package/install command: ${bin} ${args[0]}`);
+    // powershell -Command "..." / cmd /c "..." run from bash get the PowerShell/cmd rules.
+    const windowsCommand = nestedWindowsCommand(argv);
+    if (windowsCommand) {
+      const nested = evaluatePowerShellCommand(windowsCommand, { cwd, denyPathPrefixes });
+      for (const item of nested.denials) deny(item.code, item.reason);
+      for (const item of nested.warnings) warn(item.reason);
+    }
     for (const redirect of item.redirects) {
       if (redirect.op === "dup") continue;
       const prefix = isDeniedPath(redirect.target, cwd, denyPathPrefixes);
