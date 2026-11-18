@@ -2,6 +2,7 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
+const { findExecutable } = require("./win-exec.js");
 
 const LANGUAGE_BY_EXTENSION = Object.freeze({
   ".c": "c", ".h": "cpp", ".cc": "cpp", ".cpp": "cpp", ".cxx": "cpp", ".hh": "cpp", ".hpp": "cpp", ".hxx": "cpp", ".cu": "cuda", ".cuh": "cuda",
@@ -18,6 +19,8 @@ const SERVER_DEFINITIONS = Object.freeze([
 ]);
 function inferLanguage(file) { return LANGUAGE_BY_EXTENSION[path.extname(String(file || "")).toLowerCase()] || "text"; }
 function executableInfo(bin, env = process.env) {
+  // Windows has no execute bit; servers are .exe or npm .cmd shims (PATHEXT).
+  if (process.platform === "win32") return findExecutable(String(bin), env);
   const hasSeparator = String(bin).includes("/") || String(bin).includes("\\") || path.isAbsolute(bin);
   const candidates = hasSeparator ? [path.resolve(bin)] : String(env.PATH || "").split(path.delimiter).filter(Boolean).map((dir) => path.join(dir, bin));
   for (const candidate of candidates) {

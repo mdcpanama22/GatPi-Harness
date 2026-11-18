@@ -2,6 +2,7 @@
 
 const { EventEmitter } = require("node:events");
 const { spawn } = require("node:child_process");
+const { resolveSpawn } = require("./win-exec.js");
 const { pathToFileURL } = require("node:url");
 
 function abortError(message = "LSP request aborted") { const error = new Error(message); error.name = "AbortError"; error.code = "ABORT_ERR"; return error; }
@@ -35,7 +36,10 @@ class LspClient extends EventEmitter {
     this.stopped = false;
     this.exit = null;
     this.buffer = Buffer.alloc(0);
-    const child = this.spawn(this.command, this.args, { cwd: this.cwd, env: this.env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+    // Windows: npm-installed servers (typescript-language-server, pyright) are
+    // .cmd shims, which need cmd.exe; resolveSpawn quotes them.
+    const launch = resolveSpawn(this.command, this.args || [], this.env || process.env);
+    const child = this.spawn(launch.command, launch.args, { cwd: this.cwd, env: this.env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true, ...launch.options });
     this.process = child;
     child.stdout.on("data", (chunk) => this._onData(chunk));
     child.stderr.on("data", (chunk) => { this.stderr = `${this.stderr}${String(chunk)}`.slice(-this.maxStderrBytes); this.emit("stderr", String(chunk)); });

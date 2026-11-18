@@ -41,7 +41,10 @@ class LspSessionManager {
     let session = this.sessions.get(key);
     if (session?.client?.exit) { this.sessions.delete(key); session = null; }
     if (!session) {
-      const client = new this.Client({ command: server.command, args: server.args, cwd: root, timeoutMs: options.timeoutMs || this.timeoutMs, ...this.clientOptions });
+      // Spawn exactly what the registry found (on Windows a PATHEXT match such as
+      // typescript-language-server.cmd), not a second PATH lookup.
+      const command = server.executable?.found && server.executable.path ? server.executable.path : server.command;
+      const client = new this.Client({ command, args: server.args, cwd: root, timeoutMs: options.timeoutMs || this.timeoutMs, ...this.clientOptions });
       session = { key, root, language: input.language, configurationHash: configurationHash(input.configuration), server, client, capabilities: {}, startedAt: null, restartCount: Number(input.restartCount || 0) };
       this.sessions.set(key, session);
       client.on?.("exit", () => { session.exited = true; });
