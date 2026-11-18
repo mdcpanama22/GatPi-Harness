@@ -8,6 +8,7 @@ const crypto = require("node:crypto");
 const { execFile } = require("node:child_process");
 const { pathToFileURL, fileURLToPath } = require("node:url");
 const { LspFallbackRunner } = require("./lsp-fallback-runner.js");
+const { findExecutable } = require("./win-exec.js");
 const { inferLanguage: registryInferLanguage, serverRegistry } = require("./lsp-server-registry.js");
 const { LspSessionManager, classifyFailure } = require("./lsp-session-manager.js");
 const { previewWorkspaceEdit, applyWorkspaceEdit } = require("./semantic-editor.js");
@@ -96,12 +97,8 @@ function truncateHead(text, options = {}) {
   return { content: out.join("\n"), truncated: out.length < lines.length || bytes < totalBytes, outputLines: out.length, totalLines: lines.length, outputBytes: bytes, totalBytes };
 }
 function executableInfo(bin, env = process.env) {
-  const hasSep = bin.includes("/") || bin.includes("\\") || path.isAbsolute(bin);
-  const candidates = hasSep ? [path.resolve(bin)] : String(env.PATH || "").split(path.delimiter).filter(Boolean).map((dir) => path.join(dir, bin));
-  for (const candidate of candidates) {
-    try { fs.accessSync(candidate, fs.constants.X_OK); return { bin, found: true, path: candidate }; } catch {}
-  }
-  return { bin, found: false, path: hasSep ? path.resolve(bin) : null };
+  // PATHEXT-aware on Windows (language servers are usually .cmd shims or .exe).
+  return findExecutable(bin, env);
 }
 function envReport(env = process.env) {
   return {

@@ -13,6 +13,7 @@ const { buildImportGraph, affectedTestFiles } = require("./test-selection.js");
 const { normalizeOperation, normalizeStringList } = require("./extension-args.js");
 const { withNodeTestCoverage } = require("./node-test-coverage.js");
 const { assertProjectScope } = require("./project-scope.js");
+const { findExecutable, resolveSpawn } = require("./win-exec.js");
 
 const TEST_RUNNER_OPERATIONS = ["status", "listProfiles", "infer", "run", "rerunFailures"];
 const TEST_RUNNER_PROFILES = ["quick", "changed", "full", "live", "unit", "integration", "lint", "typecheck"];
@@ -141,11 +142,9 @@ function writeJson(file, data) { ensureDir(path.dirname(file)); fs.writeFileSync
 function stateRoot(cwd) { const root = path.join(cwd, STATE_DIR); ensureDir(root); return root; }
 function latestFile(cwd) { return path.join(stateRoot(cwd), "latest.json"); }
 function executableInfo(bin, env = process.env) {
-  const candidates = String(env.PATH || "").split(path.delimiter).filter(Boolean).map((dir) => path.join(dir, bin));
-  for (const candidate of candidates) {
-    try { fs.accessSync(candidate, fs.constants.X_OK); return { bin, found: true, path: candidate }; } catch {}
-  }
-  return { bin, found: false, path: null };
+  // PATHEXT-aware on Windows (pytest -> pytest.exe, go -> go.exe).
+  const info = findExecutable(bin, env);
+  return { bin, found: info.found, path: info.found ? info.path : null };
 }
 function envReport(env = process.env) {
   return {
@@ -364,13 +363,18 @@ function runCommandSpec(cwd, commandSpec, config, signal, timeoutMs) {
 function executeCommandSpec(cwd, commandSpec, config, signal, timeoutMs, environment) {
   const startedAt = Date.now();
   return new Promise((resolve) => {
-    execFile(commandSpec.command, commandSpec.args || [], {
+    const env = { ...process.env, CI: process.env.CI || "1", NO_COLOR: "1", FORCE_COLOR: "0", ...environment };
+    // On Windows npm/npx/pnpm/yarn are .cmd shims that execFile cannot start,
+    // and bash is usually Git Bash off PATH; resolveSpawn handles both.
+    const launch = resolveSpawn(commandSpec.command, commandSpec.args || [], env);
+    execFile(launch.command, launch.args, {
       cwd,
       encoding: "utf8",
       timeout: timeoutMs || config.timeoutMs,
       maxBuffer: config.maxBuffer,
       signal,
-      env: { ...process.env, CI: process.env.CI || "1", NO_COLOR: "1", FORCE_COLOR: "0", ...environment },
+      env,
+      ...launch.options,
     }, (error, stdout = "", stderr = "") => {
       const durationMs = Date.now() - startedAt;
       const output = stripAnsi(`${stdout || ""}${stderr ? `\n${stderr}` : ""}`);

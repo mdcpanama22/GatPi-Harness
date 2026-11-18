@@ -4,6 +4,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const { hardenFd } = require("./private-fs.js");
 const path = require("node:path");
+const { findExecutable } = require("./win-exec.js");
 
 const HERMES_READINESS_SCHEMA_VERSION = 1;
 const HERMES_READINESS_POLICY_VERSION = "hermes-readiness-v4";
@@ -38,10 +39,9 @@ function timeoutFor(kind, requested, policy = policyFromEnv()) {
   return clamp(requested, ceiling, 1000, ceiling);
 }
 function executableInfo(bin = "hermes", env = process.env) {
-  const hasSep = String(bin).includes("/") || String(bin).includes("\\") || path.isAbsolute(String(bin));
-  const candidates = hasSep ? [path.resolve(String(bin))] : String(env.PATH || "").split(path.delimiter).filter(Boolean).map((dir) => path.join(dir, String(bin)));
-  for (const candidate of candidates) { try { fs.accessSync(candidate, fs.constants.X_OK); return { found: true, path: candidate }; } catch {} }
-  return { found: false, path: null };
+  // PATHEXT-aware on Windows (hermes -> hermes.exe / hermes.cmd).
+  const info = findExecutable(String(bin), env);
+  return { found: info.found, path: info.found ? info.path : null };
 }
 function identityFor(options = {}) {
   const executable = executableInfo(options.bin || process.env.PI_HERMES_BIN || "hermes", options.env || process.env);

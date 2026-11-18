@@ -6,6 +6,7 @@ const crypto = require("node:crypto");
 const { execFile, execFileSync, spawnSync } = require("node:child_process");
 const { readChangeSet, readChangeSetAsync, runGitAsync, workingTreeRevision, revisionId, fileContentIdentity, sourceKindForPath } = require("./code-context-revision.js");
 const { assertProjectScope, projectScope, owningRoot } = require("./project-scope.js");
+const { findExecutable } = require("./win-exec.js");
 const {
   codegraphQueryEnvelope,
   codegraphAffectedEnvelope,
@@ -308,12 +309,8 @@ function attachResultMetadata(output, cwd, options = {}) {
   return output;
 }
 function executableInfo(bin = "codegraph", env = process.env) {
-  const hasSep = bin.includes("/") || bin.includes("\\") || path.isAbsolute(bin);
-  const candidates = hasSep ? [path.resolve(bin)] : String(env.PATH || "").split(path.delimiter).filter(Boolean).map((dir) => path.join(dir, bin));
-  for (const candidate of candidates) {
-    try { fs.accessSync(candidate, fs.constants.X_OK); return { bin, found: true, path: candidate }; } catch {}
-  }
-  return { bin, found: false, path: hasSep ? path.resolve(bin) : null };
+  // PATHEXT-aware on Windows (codegraph -> codegraph.cmd / codegraph.exe).
+  return findExecutable(bin, env);
 }
 function envReport(env = process.env) {
   return {
