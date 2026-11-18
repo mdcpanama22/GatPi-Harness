@@ -1,6 +1,7 @@
 "use strict";
 
 const fs = require("node:fs");
+const { hardenFd } = require("../private-fs.js");
 const path = require("node:path");
 const { ANALYSIS_ASSIGNMENTS_MAX, CLAIMS_MAX, EVIDENCE_ID_MAX_LENGTH, EVIDENCE_ITEMS_MAX, EVIDENCE_TEXT_MAX_LENGTH, ROADMAP_GOAL_MAX_LENGTH, SYNTHESIS_ITEMS_MAX } = require("../role-result-schemas");
 
@@ -10,7 +11,7 @@ function writePrivateExport(file, value) {
   const dirBefore = fs.lstatSync(dir);
   if (dirBefore.isSymbolicLink() || !dirBefore.isDirectory()) throw new Error(`topology export directory is unsafe: ${dir}`);
   const dirFd = fs.openSync(dir, fs.constants.O_RDONLY | (fs.constants.O_DIRECTORY || 0) | (fs.constants.O_NOFOLLOW || 0));
-  try { const opened = fs.fstatSync(dirFd); if (!opened.isDirectory() || Number(opened.dev) !== Number(dirBefore.dev) || Number(opened.ino) !== Number(dirBefore.ino)) throw new Error(`topology export directory changed while opening: ${dir}`); fs.fchmodSync(dirFd, 0o700); const after = fs.lstatSync(dir); if (after.isSymbolicLink() || Number(after.dev) !== Number(opened.dev) || Number(after.ino) !== Number(opened.ino)) throw new Error(`topology export directory changed while hardening: ${dir}`); }
+  try { const opened = fs.fstatSync(dirFd); if (!opened.isDirectory() || Number(opened.dev) !== Number(dirBefore.dev) || Number(opened.ino) !== Number(dirBefore.ino)) throw new Error(`topology export directory changed while opening: ${dir}`); hardenFd(dirFd, 0o700); const after = fs.lstatSync(dir); if (after.isSymbolicLink() || Number(after.dev) !== Number(opened.dev) || Number(after.ino) !== Number(opened.ino)) throw new Error(`topology export directory changed while hardening: ${dir}`); }
   finally { fs.closeSync(dirFd); }
   const temporary = `${file}.${process.pid}.${Date.now()}.tmp`;
   let fd;
@@ -19,7 +20,7 @@ function writePrivateExport(file, value) {
     fd = fs.openSync(temporary, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW || 0), 0o600); created = true;
     const opened = fs.fstatSync(fd); if (!opened.isFile()) throw new Error(`topology export temporary path is unsafe: ${temporary}`);
     const current = fs.lstatSync(temporary); if (current.isSymbolicLink() || Number(current.dev) !== Number(opened.dev) || Number(current.ino) !== Number(opened.ino)) throw new Error("topology export temporary path changed while open");
-    fs.fchmodSync(fd, 0o600); fs.writeFileSync(fd, `${JSON.stringify(value, null, 2)}\n`); fs.closeSync(fd); fd = undefined;
+    hardenFd(fd, 0o600); fs.writeFileSync(fd, `${JSON.stringify(value, null, 2)}\n`); fs.closeSync(fd); fd = undefined;
     try { const existing = fs.lstatSync(file); if (existing.isSymbolicLink() || !existing.isFile()) throw new Error(`topology export path is unsafe: ${file}`); } catch (error) { if (error?.code !== "ENOENT") throw error; }
     fs.renameSync(temporary, file);
     const installed = fs.lstatSync(file); if (installed.isSymbolicLink() || Number(installed.dev) !== Number(opened.dev) || Number(installed.ino) !== Number(opened.ino)) throw new Error("topology export path changed while installing");

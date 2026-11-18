@@ -3,6 +3,7 @@
 /** Preview-first, structure-preserving remediation for managed-state payloads. */
 
 const fs = require("node:fs");
+const { hardenFd } = require("./private-fs.js");
 const os = require("node:os");
 const path = require("node:path");
 const crypto = require("node:crypto");
@@ -249,7 +250,7 @@ function replaceFileAtomically(file, beforeIdentity, current, output) {
   try {
     descriptor = fs.openSync(temporary, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW || 0), 0o600);
     fs.writeFileSync(descriptor, output);
-    fs.fchmodSync(descriptor, 0o600);
+    hardenFd(descriptor, 0o600);
     fs.fsyncSync(descriptor);
     fs.closeSync(descriptor);
     descriptor = undefined;

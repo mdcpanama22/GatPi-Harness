@@ -9,6 +9,7 @@
  */
 
 const fs = require("node:fs");
+const { hardenFd } = require("./private-fs.js");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const { spawn } = require("node:child_process");
@@ -92,7 +93,7 @@ function readJson(file, fallback) {
 function ensurePrivateDir(dir) {
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const { fd, opened } = openStatePath(dir, "directory");
-  try { fs.fchmodSync(fd, 0o700); assertStatePathIdentity(dir, opened, "directory"); }
+  try { hardenFd(fd, 0o700); assertStatePathIdentity(dir, opened, "directory"); }
   finally { fs.closeSync(fd); }
 }
 function writeJson(file, value) {
@@ -106,7 +107,7 @@ function writeJson(file, value) {
     const opened = fs.fstatSync(fd);
     assertStatePath(temporary, opened, "file");
     assertStatePathIdentity(temporary, opened, "file");
-    fs.fchmodSync(fd, 0o600);
+    hardenFd(fd, 0o600);
     fs.writeFileSync(fd, `${JSON.stringify(value, null, 2)}\n`);
     assertStatePathIdentity(temporary, opened, "file");
     fs.closeSync(fd); fd = undefined;
@@ -127,7 +128,7 @@ function appendJsonl(file, value) {
     if (error?.code !== "ENOENT") throw error;
     fd = fs.openSync(file, fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_CREAT | fs.constants.O_EXCL | NO_FOLLOW, 0o600);
   }
-  try { const opened = fs.fstatSync(fd); assertStatePath(file, opened, "file"); assertStatePathIdentity(file, opened, "file"); fs.fchmodSync(fd, 0o600); fs.writeFileSync(fd, `${JSON.stringify(value)}\n`); assertStatePathIdentity(file, opened, "file"); }
+  try { const opened = fs.fstatSync(fd); assertStatePath(file, opened, "file"); assertStatePathIdentity(file, opened, "file"); hardenFd(fd, 0o600); fs.writeFileSync(fd, `${JSON.stringify(value)}\n`); assertStatePathIdentity(file, opened, "file"); }
   finally { fs.closeSync(fd); }
 }
 function hardenDirectoryTree(root, maxEntries = 10000) {
@@ -139,7 +140,7 @@ function hardenDirectoryTree(root, maxEntries = 10000) {
     if (stat.isSymbolicLink()) return;
     const type = stat.isDirectory() ? "directory" : stat.isFile() ? "file" : null;
     if (!type) return;
-    try { const opened = openStatePath(target, type); try { fs.fchmodSync(opened.fd, type === "directory" ? 0o700 : 0o600); assertStatePathIdentity(target, opened.opened, type); } finally { fs.closeSync(opened.fd); } }
+    try { const opened = openStatePath(target, type); try { hardenFd(opened.fd, type === "directory" ? 0o700 : 0o600); assertStatePathIdentity(target, opened.opened, type); } finally { fs.closeSync(opened.fd); } }
     catch { return; }
     if (type !== "directory") return;
     let names = [];

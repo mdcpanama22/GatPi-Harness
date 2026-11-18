@@ -8,6 +8,7 @@
  */
 
 const fs = require("node:fs");
+const { hardenFd } = require("./private-fs.js");
 const os = require("node:os");
 const path = require("node:path");
 const zlib = require("node:zlib");
@@ -29,7 +30,7 @@ function ensureDir(dir) {
   try {
     const opened = fs.fstatSync(fd);
     if (!opened.isDirectory() || Number(before.dev) !== Number(opened.dev) || Number(before.ino) !== Number(opened.ino)) throw new Error(`runtime state directory changed while opening: ${dir}`);
-    fs.fchmodSync(fd, 0o700);
+    hardenFd(fd, 0o700);
     const after = fs.lstatSync(dir);
     if (after.isSymbolicLink() || !after.isDirectory() || Number(after.dev) !== Number(opened.dev) || Number(after.ino) !== Number(opened.ino)) throw new Error(`runtime state directory changed while hardening: ${dir}`);
   } finally { fs.closeSync(fd); }
@@ -422,7 +423,7 @@ function writePrivateManifest(file, value) {
     if (!opened.isFile()) throw new Error(`runtime manifest temporary path is not a regular file: ${temporary}`);
     const currentTemporary = fs.lstatSync(temporary);
     if (currentTemporary.isSymbolicLink() || !sameIdentity({ dev: Number(opened.dev), ino: Number(opened.ino), type: "file" }, { dev: Number(currentTemporary.dev), ino: Number(currentTemporary.ino), type: currentTemporary.isFile() ? "file" : "special" })) throw new Error("runtime manifest temporary path changed while open");
-    fs.fchmodSync(fd, 0o600);
+    hardenFd(fd, 0o600);
     fs.writeFileSync(fd, `${JSON.stringify(value, null, 2)}\n`);
     fs.closeSync(fd); fd = undefined;
     const existing = lstat(file);
@@ -454,7 +455,7 @@ function applyCleanup(plan, { dryRun = true, cwd = plan.cwd, writeManifest = tru
           if (item.expectedType && current.type !== item.expectedType) throw new Error("cleanup target type changed since preview");
           const flags = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0) | (current.type === "directory" ? (fs.constants.O_DIRECTORY || 0) : 0);
           const fd = fs.openSync(item.path, flags);
-          try { const opened = fs.fstatSync(fd); const openedIdentity = { dev: Number(opened.dev), ino: Number(opened.ino), type: opened.isDirectory() ? "directory" : opened.isFile() ? "file" : "special" }; if (!sameIdentity(current, openedIdentity)) throw new Error("cleanup target changed since preview"); fs.fchmodSync(fd, item.toMode); const after = identity(item.path); if (!sameIdentity(openedIdentity, after)) throw new Error("cleanup target changed while hardening"); }
+          try { const opened = fs.fstatSync(fd); const openedIdentity = { dev: Number(opened.dev), ino: Number(opened.ino), type: opened.isDirectory() ? "directory" : opened.isFile() ? "file" : "special" }; if (!sameIdentity(current, openedIdentity)) throw new Error("cleanup target changed since preview"); hardenFd(fd, item.toMode); const after = identity(item.path); if (!sameIdentity(openedIdentity, after)) throw new Error("cleanup target changed while hardening"); }
           finally { fs.closeSync(fd); }
         }
         else if (item.action === "delete") { if (current.type !== "file") throw new Error("cleanup target type changed since preview"); fs.unlinkSync(item.path); action.afterBytes = 0; }
@@ -500,7 +501,7 @@ function truncateJsonl(file, keepLines, archiveDir, gzip, expectedIdentity) {
       archivePath = path.join(archiveDir, `${path.basename(file).replace(/[^A-Za-z0-9_.-]/g, "_")}-${Date.now()}.jsonl${gzip ? ".gz" : ""}`);
       const archiveContent = gzip ? zlib.gzipSync(Buffer.from(`${archiveLines.join("\n")}\n`)) : Buffer.from(`${archiveLines.join("\n")}\n`);
       const archiveFd = fs.openSync(archivePath, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW || 0), 0o600);
-      try { const archiveStat = fs.fstatSync(archiveFd); if (!archiveStat.isFile()) throw new Error("cleanup archive path is not a regular file"); fs.fchmodSync(archiveFd, 0o600); fs.writeFileSync(archiveFd, archiveContent); const installed = fs.lstatSync(archivePath); if (installed.isSymbolicLink() || Number(installed.dev) !== Number(archiveStat.dev) || Number(installed.ino) !== Number(archiveStat.ino)) throw new Error("cleanup archive path changed while writing"); }
+      try { const archiveStat = fs.fstatSync(archiveFd); if (!archiveStat.isFile()) throw new Error("cleanup archive path is not a regular file"); hardenFd(archiveFd, 0o600); fs.writeFileSync(archiveFd, archiveContent); const installed = fs.lstatSync(archivePath); if (installed.isSymbolicLink() || Number(installed.dev) !== Number(archiveStat.dev) || Number(installed.ino) !== Number(archiveStat.ino)) throw new Error("cleanup archive path changed while writing"); }
       finally { fs.closeSync(archiveFd); }
     }
     const replacement = Buffer.from(keep.length ? `${keep.join("\n")}\n` : "");
@@ -508,7 +509,7 @@ function truncateJsonl(file, keepLines, archiveDir, gzip, expectedIdentity) {
     fs.ftruncateSync(fd, 0);
     let offset = 0;
     while (offset < replacement.length) offset += fs.writeSync(fd, replacement, offset, replacement.length - offset, offset);
-    fs.fchmodSync(fd, 0o600);
+    hardenFd(fd, 0o600);
     if (!sameIdentity(openedIdentity, identity(file))) throw new Error("cleanup target changed while truncating");
     return { beforeLines: lines.length, afterLines: keep.length, archivedLines: archiveLines.length, archivePath, afterBytes: replacement.length };
   } finally { fs.closeSync(fd); }

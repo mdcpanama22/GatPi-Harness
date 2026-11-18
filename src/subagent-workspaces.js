@@ -2,6 +2,7 @@
 
 const crypto = require("node:crypto");
 const fs = require("node:fs");
+const { hardenFd } = require("./private-fs.js");
 const path = require("node:path");
 const { execFileSync } = require("node:child_process");
 
@@ -28,7 +29,7 @@ function openWorkspaceState(file, type, flags = fs.constants.O_RDONLY) {
 function ensurePrivateDir(dir) {
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const opened = openWorkspaceState(dir, "directory");
-  try { fs.fchmodSync(opened.fd, 0o700); assertWorkspaceStateIdentity(dir, opened.opened, "directory"); }
+  try { hardenFd(opened.fd, 0o700); assertWorkspaceStateIdentity(dir, opened.opened, "directory"); }
   finally { fs.closeSync(opened.fd); }
   return dir;
 }
@@ -39,7 +40,7 @@ function writePrivateBuffer(file, content) {
   let created = false;
   try {
     fd = fs.openSync(temporary, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | NO_FOLLOW, 0o600); created = true;
-    const opened = fs.fstatSync(fd); assertWorkspaceStatePath(temporary, opened, "file"); assertWorkspaceStateIdentity(temporary, opened, "file"); fs.fchmodSync(fd, 0o600); fs.writeFileSync(fd, content); assertWorkspaceStateIdentity(temporary, opened, "file"); fs.closeSync(fd); fd = undefined;
+    const opened = fs.fstatSync(fd); assertWorkspaceStatePath(temporary, opened, "file"); assertWorkspaceStateIdentity(temporary, opened, "file"); hardenFd(fd, 0o600); fs.writeFileSync(fd, content); assertWorkspaceStateIdentity(temporary, opened, "file"); fs.closeSync(fd); fd = undefined;
     try { const existing = fs.lstatSync(file); assertWorkspaceStatePath(file, existing, "file"); } catch (error) { if (error?.code !== "ENOENT") throw error; }
     fs.renameSync(temporary, file); assertWorkspaceStateIdentity(file, opened, "file");
   } catch (error) { if (created) try { fs.rmSync(temporary, { force: true }); } catch {} throw error; }

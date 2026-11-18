@@ -3,6 +3,7 @@
 /** Filesystem-backed implementation of the integration storage interface. */
 
 const fs = require("node:fs");
+const { hardenFd } = require("./private-fs.js");
 const path = require("node:path");
 const crypto = require("node:crypto");
 
@@ -34,13 +35,13 @@ function openValidated(target, type, flags = fs.constants.O_RDONLY) {
 function ensurePrivateDir(dir) {
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const { fd, opened } = openValidated(dir, "directory");
-  try { fs.fchmodSync(fd, 0o700); assertPathIdentity(dir, opened, "directory"); }
+  try { hardenFd(fd, 0o700); assertPathIdentity(dir, opened, "directory"); }
   finally { fs.closeSync(fd); }
   return dir;
 }
 function hardenPrivateFile(file) {
   const { fd, opened } = openValidated(file, "file");
-  try { fs.fchmodSync(fd, 0o600); assertPathIdentity(file, opened, "file"); }
+  try { hardenFd(fd, 0o600); assertPathIdentity(file, opened, "file"); }
   finally { fs.closeSync(fd); }
   return file;
 }
@@ -50,7 +51,7 @@ function writePrivateExclusive(file, content) {
     const opened = fs.fstatSync(fd);
     assertRealPath(file, opened, "file");
     assertPathIdentity(file, opened, "file");
-    fs.fchmodSync(fd, 0o600);
+    hardenFd(fd, 0o600);
     fs.writeFileSync(fd, content);
     assertPathIdentity(file, opened, "file");
     return opened;
@@ -72,7 +73,7 @@ function appendPrivateFile(file, content) {
     const opened = fs.fstatSync(fd);
     assertRealPath(file, opened, "file");
     assertPathIdentity(file, opened, "file");
-    fs.fchmodSync(fd, 0o600);
+    hardenFd(fd, 0o600);
     fs.writeFileSync(fd, content);
     assertPathIdentity(file, opened, "file");
   } finally { fs.closeSync(fd); }
@@ -204,7 +205,7 @@ function diagnosticRows(text, fallbackAt) {
 function maintainDiagnosticJsonl(file, policy, now, force = false) {
   const { fd, opened } = openValidated(file, "file");
   try {
-    fs.fchmodSync(fd, 0o600);
+    hardenFd(fd, 0o600);
     const cached = diagnosticState.get(file);
     if (!force && cached && sameIdentity(cached, opened) && cached.bytes === opened.size && cached.count <= policy.maxRecords && opened.size <= policy.maxBytes && cached.oldestAt >= now - policy.maxAgeMs) return { bytes: opened.size, records: cached.count, compacted: false, dropped: 0 };
     // Include the preceding byte so a suffix already on a record boundary
@@ -448,7 +449,7 @@ class FileIntegrationStorage {
       const temporaryIdentity = fs.fstatSync(temporaryFd);
       assertRealPath(temporary, temporaryIdentity, "file");
       assertPathIdentity(temporary, temporaryIdentity, "file");
-      fs.fchmodSync(temporaryFd, 0o600);
+      hardenFd(temporaryFd, 0o600);
       const buffer = Buffer.allocUnsafe(64 * 1024);
       for (;;) {
         const bytes = fs.readSync(sourceFd, buffer, 0, buffer.length, null);

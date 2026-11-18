@@ -10,6 +10,7 @@
  */
 
 const fs = require("node:fs");
+const { hardenFd } = require("./private-fs.js");
 const os = require("node:os");
 const path = require("node:path");
 const crypto = require("node:crypto");
@@ -215,7 +216,7 @@ function restoreFileState(cwd, fileState, { removeExtra = false, ignore = DEFAUL
     const fd = fs.openSync(target.full, flags, mode);
     try {
       fs.writeFileSync(fd, state.text ? String(state.content || "") : Buffer.from(state.content || "", "base64"));
-      if (state.mode) try { fs.fchmodSync(fd, mode); } catch {}
+      if (state.mode) try { hardenFd(fd, mode); } catch {}
     } finally { fs.closeSync(fd); }
   }
 }

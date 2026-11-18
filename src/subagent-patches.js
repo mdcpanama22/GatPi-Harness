@@ -2,6 +2,7 @@
 
 const crypto = require("node:crypto");
 const fs = require("node:fs");
+const { hardenFd } = require("./private-fs.js");
 const path = require("node:path");
 const { execFileSync } = require("node:child_process");
 const { repositoryRoot, repositoryFingerprint, sameFingerprint, assertSafeRelative, pathForbidden } = require("./subagent-workspaces");
@@ -20,14 +21,14 @@ function openPatchState(file, type, flags = fs.constants.O_RDONLY) {
   try { const opened = fs.fstatSync(fd); assertPatchStatePath(file, opened, type); if (!sameIdentity(before, opened)) throw new Error(`subagent patch state ${type} changed while opening: ${file}`); assertPatchStateIdentity(file, opened, type); return { fd, opened }; }
   catch (error) { fs.closeSync(fd); throw error; }
 }
-function ensurePrivateDir(dir) { fs.mkdirSync(dir, { recursive: true, mode: 0o700 }); const opened = openPatchState(dir, "directory"); try { fs.fchmodSync(opened.fd, 0o700); assertPatchStateIdentity(dir, opened.opened, "directory"); } finally { fs.closeSync(opened.fd); } }
+function ensurePrivateDir(dir) { fs.mkdirSync(dir, { recursive: true, mode: 0o700 }); const opened = openPatchState(dir, "directory"); try { hardenFd(opened.fd, 0o700); assertPatchStateIdentity(dir, opened.opened, "directory"); } finally { fs.closeSync(opened.fd); } }
 function writePrivateJson(file, value) {
   ensurePrivateDir(path.dirname(file));
   const temporary = `${file}.${process.pid}.${Date.now()}.tmp`;
   let fd; let created = false;
   try {
     fd = fs.openSync(temporary, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | NO_FOLLOW, 0o600); created = true;
-    const opened = fs.fstatSync(fd); assertPatchStatePath(temporary, opened, "file"); assertPatchStateIdentity(temporary, opened, "file"); fs.fchmodSync(fd, 0o600); fs.writeFileSync(fd, `${JSON.stringify(value, null, 2)}\n`); assertPatchStateIdentity(temporary, opened, "file"); fs.closeSync(fd); fd = undefined;
+    const opened = fs.fstatSync(fd); assertPatchStatePath(temporary, opened, "file"); assertPatchStateIdentity(temporary, opened, "file"); hardenFd(fd, 0o600); fs.writeFileSync(fd, `${JSON.stringify(value, null, 2)}\n`); assertPatchStateIdentity(temporary, opened, "file"); fs.closeSync(fd); fd = undefined;
     try { const existing = fs.lstatSync(file); assertPatchStatePath(file, existing, "file"); } catch (cause) { if (cause?.code !== "ENOENT") throw cause; }
     fs.renameSync(temporary, file); assertPatchStateIdentity(file, opened, "file");
   } catch (cause) { if (created) try { fs.rmSync(temporary, { force: true }); } catch {} throw cause; }

@@ -1,6 +1,7 @@
 "use strict";
 
 const fs = require("node:fs");
+const { hardenFd } = require("./private-fs.js");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const { MEMORY_KINDS, VERIFICATION_STATES, safeIso } = require("./project-memory-schema");
@@ -12,14 +13,14 @@ function ensurePrivateDir(dir) { fs.mkdirSync(dir, { recursive: true, mode: 0o70
 function appendPrivate(file, row) {
   ensurePrivateDir(path.dirname(file));
   const fd = fs.openSync(file, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_APPEND | (fs.constants.O_NOFOLLOW || 0), 0o600);
-  try { const stat = fs.fstatSync(fd); if (!stat.isFile()) throw new Error(`unsafe project-memory ledger: ${file}`); fs.fchmodSync(fd, 0o600); fs.writeSync(fd, `${JSON.stringify(row)}\n`); }
+  try { const stat = fs.fstatSync(fd); if (!stat.isFile()) throw new Error(`unsafe project-memory ledger: ${file}`); hardenFd(fd, 0o600); fs.writeSync(fd, `${JSON.stringify(row)}\n`); }
   finally { fs.closeSync(fd); }
 }
 function writePrivateJson(file, value) {
   ensurePrivateDir(path.dirname(file));
   const temporary = `${file}.${process.pid}.${Date.now()}.tmp`;
   const fd = fs.openSync(temporary, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW || 0), 0o600);
-  try { fs.fchmodSync(fd, 0o600); fs.writeFileSync(fd, `${JSON.stringify(value, null, 2)}\n`); }
+  try { hardenFd(fd, 0o600); fs.writeFileSync(fd, `${JSON.stringify(value, null, 2)}\n`); }
   finally { fs.closeSync(fd); }
   try { const current = fs.lstatSync(file); if (current.isSymbolicLink() || !current.isFile()) throw new Error(`unsafe project-memory state file: ${file}`); } catch (error) { if (error?.code !== "ENOENT") { fs.rmSync(temporary, { force: true }); throw error; } }
   fs.renameSync(temporary, file); fs.chmodSync(file, 0o600);

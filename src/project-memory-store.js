@@ -1,6 +1,7 @@
 "use strict";
 
 const fs = require("node:fs");
+const { hardenFd } = require("./private-fs.js");
 const path = require("node:path");
 const { projectIdentity } = require("./project-identity");
 const { normalizeCandidate, validateCandidate, projectFolderName, noteFileForKind, noteFrontmatter, parseFrontmatter, sha256, normalizeKey, forbiddenReasons, VERIFICATION_STATES, VERIFICATION_RANK, MEMORY_KINDS, WRITABLE_KINDS } = require("./project-memory-schema");
@@ -75,7 +76,7 @@ function atomicWrite(file, text, root) {
   catch (error) { if (error?.code !== "ENOENT") throw error; }
   const temporary = path.join(path.dirname(file), `.${path.basename(file)}.${process.pid}.${Date.now()}.tmp`);
   const fd = fs.openSync(temporary, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW || 0), 0o600);
-  try { fs.fchmodSync(fd, 0o600); fs.writeFileSync(fd, String(text)); fs.fsyncSync(fd); }
+  try { hardenFd(fd, 0o600); fs.writeFileSync(fd, String(text)); fs.fsyncSync(fd); }
   finally { fs.closeSync(fd); }
   fs.renameSync(temporary, file); chmodSafe(file, 0o600);
 }
@@ -130,7 +131,7 @@ function sortEntries(entries) { return [...entries].sort((a, b) => String(b.upda
 function withFileLock(file, fn) {
   ensurePrivateDir(path.dirname(file)); const started = Date.now(); let fd;
   while (fd === undefined) {
-    try { fd = fs.openSync(file, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW || 0), 0o600); fs.fchmodSync(fd, 0o600); fs.writeFileSync(fd, `${JSON.stringify({ pid: process.pid, at: new Date().toISOString() })}\n`); fs.fsyncSync(fd); }
+    try { fd = fs.openSync(file, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW || 0), 0o600); hardenFd(fd, 0o600); fs.writeFileSync(fd, `${JSON.stringify({ pid: process.pid, at: new Date().toISOString() })}\n`); fs.fsyncSync(fd); }
     catch (error) {
       if (error?.code !== "EEXIST") throw error;
       let stale = false;

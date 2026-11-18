@@ -2,6 +2,7 @@
 
 const crypto = require("node:crypto");
 const fs = require("node:fs");
+const { hardenFd } = require("./private-fs.js");
 const os = require("node:os");
 const path = require("node:path");
 
@@ -50,7 +51,7 @@ function writePrivateFileExclusive(file, content) {
     const opened = fs.fstatSync(fd);
     assertPathType(file, opened, "file");
     assertPathStillOpen(file, opened, "file");
-    fs.fchmodSync(fd, 0o600);
+    hardenFd(fd, 0o600);
     fs.writeFileSync(fd, content);
     assertPathStillOpen(file, opened, "file");
   } finally { fs.closeSync(fd); }
@@ -58,7 +59,7 @@ function writePrivateFileExclusive(file, content) {
 function ensurePrivateDir(dir) {
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const { fd, opened } = openValidatedPath(dir, "directory");
-  try { fs.fchmodSync(fd, 0o700); assertPathStillOpen(dir, opened, "directory"); }
+  try { hardenFd(fd, 0o700); assertPathStillOpen(dir, opened, "directory"); }
   finally { fs.closeSync(fd); }
 }
 function writePrivateFileAtomic(file, content) {
@@ -70,7 +71,7 @@ function writePrivateFileAtomic(file, content) {
     writePrivateFileExclusive(tmp, content);
     fs.renameSync(tmp, file);
     const { fd, opened } = openValidatedPath(file, "file");
-    try { fs.fchmodSync(fd, 0o600); assertPathStillOpen(file, opened, "file"); }
+    try { hardenFd(fd, 0o600); assertPathStillOpen(file, opened, "file"); }
     finally { fs.closeSync(fd); }
   } finally { try { fs.unlinkSync(tmp); } catch {} }
 }
@@ -312,7 +313,7 @@ function planSessionHygiene(options = {}) {
 
 function hardenPlannedPath(item) {
   const { fd, opened } = openValidatedPath(item.path, item.type, item.identity);
-  try { fs.fchmodSync(fd, item.toMode); assertPathStillOpen(item.path, opened, item.type); }
+  try { hardenFd(fd, item.toMode); assertPathStillOpen(item.path, opened, item.type); }
   finally { fs.closeSync(fd); }
 }
 
@@ -393,7 +394,7 @@ function archiveSessionCandidates(plan, options = {}) {
         assertPathStillOpen(item.path, opened, "file");
         fs.renameSync(item.path, destination);
         assertPathStillOpen(destination, opened, "file");
-        fs.fchmodSync(fd, 0o600);
+        hardenFd(fd, 0o600);
         assertPathStillOpen(destination, opened, "file");
       } catch (error) { errors.push({ relativePath: item.relativePath, error: error?.message || String(error) }); continue; }
       finally { if (fd !== undefined) fs.closeSync(fd); }

@@ -2,6 +2,7 @@
 
 const crypto = require("node:crypto");
 const fs = require("node:fs");
+const { hardenFd } = require("./private-fs.js");
 const path = require("node:path");
 
 const HERMES_READINESS_SCHEMA_VERSION = 1;
@@ -68,7 +69,7 @@ function writeState(cwd, state) {
   let fd;
   try {
     fd = fs.openSync(temp, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW || 0), 0o600);
-    fs.writeFileSync(fd, `${JSON.stringify(state, null, 2)}\n`); fs.fchmodSync(fd, 0o600); fs.closeSync(fd); fd = undefined;
+    fs.writeFileSync(fd, `${JSON.stringify(state, null, 2)}\n`); hardenFd(fd, 0o600); fs.closeSync(fd); fd = undefined;
     fs.renameSync(temp, file); fs.chmodSync(file, 0o600); return true;
   } catch { try { fs.rmSync(temp, { force: true }); } catch {} return false; }
   finally { if (fd !== undefined) try { fs.closeSync(fd); } catch {} }
