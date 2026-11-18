@@ -131,7 +131,7 @@ function scan(cwd, roots, options = {}) {
   }, { maxFiles: options.maxFiles, maxBytes: options.maxBytes, deadlineMs: options.deadlineMs });
   const findings = all.flatMap((x) => x.findings || []);
   const ignoredFindings = all.flatMap((x) => x.ignored || []);
-  const sessionRoot = resolve(options.sessionRoot || join(process.env.HOME || ".", ".pi", "agent", "sessions"));
+  const sessionRoot = resolve(options.sessionRoot || join(process.env.PI_CODING_AGENT_DIR || join(require("node:os").homedir(), ".pi", "agent"), "sessions"));
   const contentReadFromRawSessions = coverage.scanned.some((row) => isWithin(sessionRoot, row.path));
   const wantsPermissionPosture = Boolean(options.rawSessionPermissions);
   const permissionPosture = wantsPermissionPosture ? sessionPermissionPosture({ root: sessionRoot }) : null;

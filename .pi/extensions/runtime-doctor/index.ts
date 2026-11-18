@@ -4,9 +4,12 @@ import { existsSync, readdirSync, readFileSync, statSync, lstatSync, writeFileSy
 import { createHash } from "node:crypto";
 import { join, dirname } from "node:path";
 import { spawnSync } from "node:child_process";
+import { homedir } from "node:os";
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
+// HOME is usually unset on Windows; Pi itself uses PI_CODING_AGENT_DIR, then ~/.pi/agent.
+function agentDir() { return process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent"); }
 const { inspectRuntimeState, planCleanup, applyCleanup, formatCleanupPlan, defaultCleanupPolicy } = require("../../../src/runtime-cleanup.js");
 const { resolveRoleRuntimeConfig, summarizeRoleStateSplit } = require("../../../src/role-runtime-rollout.js");
 const { codegraphDoctor } = require("../../../src/codegraph-adapter.js");
@@ -34,7 +37,7 @@ function sha256(value: any) { return createHash("sha256").update(typeof value ==
 function fileSize(file: string) { try { return statSync(file).size; } catch { return 0; } }
 function dirSize(dir: string, max = 4000): number { try { let total = 0; for (const name of readdirSync(dir).slice(0, max)) { const p = join(dir, name); const s = lstatSync(p); total += s.isSymbolicLink() ? s.size : s.isDirectory() ? dirSize(p, max) : s.size; } return total; } catch { return 0; } }
 function list(dir: string) { try { return readdirSync(dir); } catch { return []; } }
-function traceRoots(cwd: string, options: { includeGlobal?: boolean } = {}) { return [process.env.PI_TRACE_DIR || join(cwd, ".pi", "traces"), ...(options.includeGlobal ? [join(process.env.HOME || ".", ".pi", "agent", "traces")] : [])]; }
+function traceRoots(cwd: string, options: { includeGlobal?: boolean } = {}) { return [process.env.PI_TRACE_DIR || join(cwd, ".pi", "traces"), ...(options.includeGlobal ? [join(agentDir(), "traces")] : [])]; }
 function latestTraceFiles(cwd: string, options: { includeGlobal?: boolean } = {}) {
   const roots = traceRoots(cwd, options);
   const files = roots.flatMap((root) => list(root).filter((f) => f.endsWith(".jsonl")).map((f) => join(root, f))).sort((a, b) => fileSize(b) - fileSize(a));
@@ -63,7 +66,7 @@ function gitRoot(cwd: string) { const r = spawnSync("git", ["rev-parse", "--show
 function gitStatus(cwd: string) { const r = spawnSync("git", ["status", "--short"], { cwd, encoding: "utf8", env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" } }); return r.status === 0 ? r.stdout.trim().split(/\n/).filter(Boolean) : []; }
 function extensionInventory(cwd: string) {
   const project = list(join(cwd, ".pi", "extensions")).filter((name) => existsSync(join(cwd, ".pi", "extensions", name, "index.ts")) || name.endsWith(".ts"));
-  const global = list(join(process.env.HOME || ".", ".pi", "agent", "extensions")).filter((name) => name !== ".DS_Store");
+  const global = list(join(agentDir(), "extensions")).filter((name) => name !== ".DS_Store");
   return { project, global };
 }
 function memoryReport(cwd: string) {
@@ -139,7 +142,7 @@ function formatDoctor(d: any) {
   return lines.join("\n");
 }
 function exportReport(cwd: string, options: { includeGlobal?: boolean } = {}) { const d = doctor(cwd, options); const file = join(cwd, STATE_DIR, `doctor-${Date.now()}.json`); writeJson(file, d); return { file, report: d }; }
-function cleanupPlan(cwd: string, input: any = {}) { return planCleanup({ cwd, traceRoot: input.includeGlobal ? join(process.env.HOME || ".", ".pi", "agent", "traces") : (process.env.PI_TRACE_DIR || join(cwd, ".pi", "traces")), policy: input.policy || {} }); }
+function cleanupPlan(cwd: string, input: any = {}) { return planCleanup({ cwd, traceRoot: input.includeGlobal ? join(agentDir(), "traces") : (process.env.PI_TRACE_DIR || join(cwd, ".pi", "traces")), policy: input.policy || {} }); }
 function cleanupHistory(cwd: string) { const dir = join(cwd, ".pi", "runtime-cleanup", "manifests"); return list(dir).filter((f) => f.endsWith(".json")).sort().slice(-30).map((f) => join(dir, f)); }
 function piStateExclusion(cwd: string, apply = false) {
   // Harness runtime state lands in <repo>/.pi and shows as untracked noise in
@@ -156,10 +159,10 @@ function piStateExclusion(cwd: string, apply = false) {
   return { git: true, ignored: true, applied: true, excludeFile: file };
 }
 
-function stabilizeStatus(cwd: string) { const cognitiveBytes = dirSize(join(cwd, ".pi", "cognitive-automation")); const traceBytes = dirSize(process.env.PI_TRACE_DIR || join(process.env.HOME || ".", ".pi", "agent", "traces")); const astRefactorBytes = dirSize(join(cwd, ".pi", "ast-refactor")); const verificationBytes = dirSize(join(cwd, ".pi", "verification-center")); const risks: string[] = []; if (cognitiveBytes > 50_000_000) risks.push("large cognitive runtime state"); if (traceBytes > 100_000_000) risks.push("large trace store"); if (process.env.PI_COGNITIVE_AUTO_CONSOLIDATE === "1") risks.push("automatic consolidation enabled"); if (promptRefinementEnabled()) risks.push("automatic model prompt refinement enabled"); return { generatedAt: new Date().toISOString(), cwd, cognitiveBytes, traceBytes, astRefactorBytes, verificationBytes, risks, stable: risks.length === 0 }; }
+function stabilizeStatus(cwd: string) { const cognitiveBytes = dirSize(join(cwd, ".pi", "cognitive-automation")); const traceBytes = dirSize(process.env.PI_TRACE_DIR || join(agentDir(), "traces")); const astRefactorBytes = dirSize(join(cwd, ".pi", "ast-refactor")); const verificationBytes = dirSize(join(cwd, ".pi", "verification-center")); const risks: string[] = []; if (cognitiveBytes > 50_000_000) risks.push("large cognitive runtime state"); if (traceBytes > 100_000_000) risks.push("large trace store"); if (process.env.PI_COGNITIVE_AUTO_CONSOLIDATE === "1") risks.push("automatic consolidation enabled"); if (promptRefinementEnabled()) risks.push("automatic model prompt refinement enabled"); return { generatedAt: new Date().toISOString(), cwd, cognitiveBytes, traceBytes, astRefactorBytes, verificationBytes, risks, stable: risks.length === 0 }; }
 function stabilizePlan(cwd: string) { const s = stabilizeStatus(cwd); const actions = ["Run /doctor-hot-path to confirm measured latency risks.", "Run /verify-run quick before further edits."]; if (s.cognitiveBytes > 50_000_000) actions.push("Preview /cognitive-prune-memory and /reasoning-prune-automated before applying cleanup."); if (s.traceBytes > 100_000_000) actions.push("Use /cognitive-prune-trace --apply after exporting important traces."); if (s.risks.includes("automatic model prompt refinement enabled")) actions.push("Set PI_PROMPT_SUGGESTIONS_REFINE=off to keep model advice off the prompt path."); actions.push("Create a checkpoint or handoff before large autonomous/topology work."); return { status: s, actions }; }
 function stabilizeCheckpoint(cwd: string, note = "manual stabilization checkpoint") { const p = stabilizePlan(cwd); const file = join(cwd, STABILIZER_STATE_DIR, `checkpoint-${Date.now()}.json`); writeJson(file, { note, ...p }); return { file, ...p }; }
-function stabilizeCleanupPlan(cwd: string, input: any = {}) { return planCleanup({ cwd, traceRoot: process.env.PI_TRACE_DIR || join(process.env.HOME || ".", ".pi", "agent", "traces"), policy: input.policy || {} }); }
+function stabilizeCleanupPlan(cwd: string, input: any = {}) { return planCleanup({ cwd, traceRoot: process.env.PI_TRACE_DIR || join(agentDir(), "traces"), policy: input.policy || {} }); }
 function sessionHygieneOptions(args: any, cwd: string, activeSessionFile?: string) {
   const text = typeof args === "string" ? args : "";
   const input = typeof args === "object" && args ? args : {};
@@ -175,7 +178,7 @@ function runSessionHygiene(args: any, cwd: string, activeSessionFile: string | u
 function formatStabilize(p: any) { return [`Session stabilizer: ${p.status.stable ? "stable" : "attention needed"}`, `cognitive bytes: ${p.status.cognitiveBytes}`, `trace bytes: ${p.status.traceBytes}`, p.status.risks.length ? `risks: ${p.status.risks.join(", ")}` : "risks: none", "actions:", ...p.actions.map((a: string) => `- ${a}`)].join("\n"); }
 
 function readLines(file: string) { try { return readFileSync(file, "utf8").split(/\n/).filter(Boolean); } catch { return []; } }
-function perfTraceDirs(cwd: string, options: { includeGlobal?: boolean } = {}) { return [process.env.PI_TRACE_DIR, join(cwd, ".pi", "traces"), ...(options.includeGlobal ? [join(process.env.HOME || ".", ".pi", "agent", "traces")] : [])].filter(Boolean) as string[]; }
+function perfTraceDirs(cwd: string, options: { includeGlobal?: boolean } = {}) { return [process.env.PI_TRACE_DIR, join(cwd, ".pi", "traces"), ...(options.includeGlobal ? [join(agentDir(), "traces")] : [])].filter(Boolean) as string[]; }
 function perfTraceFiles(cwd: string, options: { includeGlobal?: boolean } = {}) { const files: string[] = []; for (const dir of perfTraceDirs(cwd, options)) { try { for (const f of readdirSync(dir)) if (/\.jsonl$|trace/.test(f)) files.push(join(dir, f)); } catch {} } return files.sort((a, b) => { try { return require("node:fs").statSync(b).mtimeMs - require("node:fs").statSync(a).mtimeMs; } catch { return 0; } }).slice(0, 12); }
 function perfEvents(cwd: string, limit = 5000, options: { includeGlobal?: boolean } = {}) { const rows: any[] = []; for (const file of perfTraceFiles(cwd, options)) for (const line of readLines(file)) { try { rows.push({ file, ...JSON.parse(line) }); } catch {} if (rows.length >= limit) break; } return rows.slice(-limit); }
 function duration(e: any) { return Number(e.duration_ms ?? e.durationMs ?? e.duration ?? 0) || 0; }

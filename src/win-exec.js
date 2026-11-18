@@ -8,7 +8,7 @@
 //   they run through `cmd.exe /d /s /c` with every argument quoted and cmd
 //   metacharacters caret-escaped (the scheme cross-spawn uses, MIT), so
 //   arguments arrive intact and cannot chain extra commands;
-// - `bash` falls back to Git Bash in the locations Pi itself checks.
+// - `bash` and `sh` fall back to Git Bash in the locations Pi itself checks.
 const fs = require("node:fs");
 const path = require("node:path");
 
@@ -90,7 +90,8 @@ function escapeCmdArgument(arg, doubleEscape) {
 function resolveSpawn(command, args = [], env = process.env, platform = process.platform) {
   if (platform !== "win32") return { command, args, options: {} };
   let resolved = findExecutable(command, env, platform);
-  if (!resolved.found && path.basename(command).toLowerCase().replace(/\.exe$/, "") === "bash") {
+  // sh and bash fall back to Git Bash, which also runs POSIX sh scripts.
+  if (!resolved.found && ["bash", "sh"].includes(path.basename(command).toLowerCase().replace(/\.exe$/, ""))) {
     const bash = gitBashPath(env);
     if (bash) resolved = { bin: command, found: true, path: bash };
   }

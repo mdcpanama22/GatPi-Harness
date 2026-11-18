@@ -36,8 +36,11 @@ function pidAlive(pid) { try { process.kill(pid, 0); return true; } catch { retu
     assert.match(jobLogs(cwd, done.jobId).text, /hello-from-job/);
 
     // 2. A long job with a grandchild: stopping it ends the whole tree.
+    // detached: Node puts non-detached children in a kill-on-close job object, so
+    // they die with their parent anyway; real tools do not, and a detached
+    // grandchild models them (otherwise this passes without the tree stop).
     const pidFile = path.join(cwd, "grandchild.pid").replace(/\\/g, "/");
-    const grandchild = `require('child_process').spawn(process.execPath, ['-e', 'require(\\'fs\\').writeFileSync(\\'${pidFile}\\', String(process.pid)); setInterval(() => {}, 1000)'], { stdio: 'ignore' }); setInterval(() => {}, 1000)`;
+    const grandchild = `require('child_process').spawn(process.execPath, ['-e', 'require(\\'fs\\').writeFileSync(\\'${pidFile}\\', String(process.pid)); setInterval(() => {}, 1000)'], { stdio: 'ignore', detached: true, windowsHide: true }).unref(); setInterval(() => {}, 1000)`;
     const longStartedAt = Date.now();
     const long = startJob(cwd, `"${node}" -e "${grandchild}"`, { resourceGuard: { rssPollMs: 500, termGraceMs: 1000 } });
     const grandchildPid = Number(await until(() => fs.existsSync(pidFile) && fs.readFileSync(pidFile, "utf8"), 30000, "grandchild start"));

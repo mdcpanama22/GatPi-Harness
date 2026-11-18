@@ -66,7 +66,7 @@ class FailureAnalyzer {
 }
 
 class FileTraceStorage {
-  constructor({ root = path.join(process.env.HOME || ".", ".pi", "agent", "traces"), sessionId = "trace", rotateBytes = 25 * 1024 * 1024, maxTotalBytes = 128 * 1024 * 1024, headroomRatio = DEFAULT_HEADROOM_RATIO, maxFiles = 200, maxAgeDays = 14, cwd = process.cwd(), compressPayloadBytes = 32 * 1024, capturePayloads = false } = {}) {
+  constructor({ root = path.join(process.env.PI_CODING_AGENT_DIR || path.join(require("node:os").homedir(), ".pi", "agent"), "traces"), sessionId = "trace", rotateBytes = 25 * 1024 * 1024, maxTotalBytes = 128 * 1024 * 1024, headroomRatio = DEFAULT_HEADROOM_RATIO, maxFiles = 200, maxAgeDays = 14, cwd = process.cwd(), compressPayloadBytes = 32 * 1024, capturePayloads = false } = {}) {
     if (!/^[A-Za-z0-9_-]+$/.test(sessionId)) throw new Error("invalid trace session id");
     if (![rotateBytes, maxTotalBytes, maxFiles, maxAgeDays].every((value) => Number.isFinite(value) && value > 0)) throw new Error("trace retention limits must be positive finite numbers");
     if (!(Number.isFinite(headroomRatio) && headroomRatio >= 0 && headroomRatio < 1)) throw new Error("trace headroom ratio must be in [0, 1)");

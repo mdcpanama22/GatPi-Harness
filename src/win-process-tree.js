@@ -8,7 +8,7 @@
 // counts only if it was created no earlier than the root, which guards against
 // PID reuse. One snapshot (Win32_Process via PowerShell, ~0.5 s) gives parent,
 // working set (the RSS equivalent) and creation time for every process.
-const { spawnSync } = require("node:child_process");
+const { execFile, spawnSync } = require("node:child_process");
 
 const SNAPSHOT_SCRIPT = [
   "Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,WorkingSetSize,CreationDate",
@@ -25,8 +25,24 @@ function snapshot() {
     maxBuffer: 8 * 1024 * 1024,
   });
   if (result.status !== 0 || !result.stdout) return [];
+  return parseSnapshot(result.stdout);
+}
+
+/** snapshot() without blocking the event loop (for monitors inside Pi's process). */
+function snapshotAsync() {
+  return new Promise((resolve) => {
+    execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", SNAPSHOT_SCRIPT], {
+      encoding: "utf8",
+      windowsHide: true,
+      timeout: 15000,
+      maxBuffer: 8 * 1024 * 1024,
+    }, (error, stdout) => resolve(error || !stdout ? [] : parseSnapshot(stdout)));
+  });
+}
+
+function parseSnapshot(stdout) {
   const processes = [];
-  for (const line of result.stdout.split(/\r?\n/)) {
+  for (const line of stdout.split(/\r?\n/)) {
     const [pid, parentPid, rss, created] = line.trim().split(",");
     if (!pid) continue;
     processes.push({ pid: Number(pid), parentPid: Number(parentPid), rssBytes: Number(rss) || 0, created: String(created || "0") });
@@ -101,4 +117,4 @@ function killProcesses(pids, { force }) {
   return result.status === 0 || result.status === 128;
 }
 
-module.exports = { snapshot, identity, treeMembers, killProcesses, fileTime };
+module.exports = { snapshot, snapshotAsync, identity, treeMembers, killProcesses, fileTime };

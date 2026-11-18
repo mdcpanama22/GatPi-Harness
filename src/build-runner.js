@@ -12,10 +12,12 @@ const crypto = require("node:crypto");
 const os = require("node:os");
 const { spawn } = require("node:child_process");
 const { normalizeTestResult } = require("./test-result-normalizer.js");
+const { findExecutable, resolveSpawn } = require("./win-exec.js");
 const {
   ownProcessGroup,
   acquireManagedWorker,
   resourceGuardConfig,
+  signalOwnedProcessGroup,
   watchOwnedProcessGroupRss,
 } = require("./resource-guard.js");
 
@@ -51,9 +53,17 @@ function readJson(file, fallback = null) {
   }
 }
 
+// Windows has no execute bit: a file is executable when its extension is in PATHEXT.
+function windowsExecutableExtension(file) {
+  const ext = path.extname(file).toLowerCase();
+  const exts = String(process.env.PATHEXT || ".COM;.EXE;.BAT;.CMD").toLowerCase().split(";").filter(Boolean);
+  return ext && exts.includes(ext) ? ext : null;
+}
+
 function isExecutable(file) {
   try {
     const stat = fs.statSync(file);
+    if (process.platform === "win32") return stat.isFile() && windowsExecutableExtension(file) !== null;
     return stat.isFile() && (stat.mode & 0o111) !== 0;
   } catch {
     return false;
@@ -132,7 +142,8 @@ function findTestBinaries(cwd, limit = 8) {
     }
     for (const name of names) {
       if (found.length >= limit) break;
-      if (/tests?$/.test(name) && isExecutable(path.join(root, name)))
+      const stem = process.platform === "win32" && windowsExecutableExtension(name) ? name.slice(0, -path.extname(name).length) : name;
+      if (/tests?$/.test(stem) && isExecutable(path.join(root, name)))
         found.push(repositoryRelativePath(cwd, path.join(root, name)) || path.join(root, name));
     }
   }
@@ -481,11 +492,16 @@ async function execute(command, args, cwd, timeoutMs, env = {}, options = {}) {
     try {
       // A detached process group lets cancellation and deadlines terminate
       // repository scripts together with any compiler grandchildren.
-      child = spawn(command, args, {
+      // On Windows, .cmd shims (npm, yarn) need cmd.exe; resolveSpawn quotes them.
+      const childEnv = { ...process.env, ...env };
+      const launch = resolveSpawn(command, args, childEnv);
+      child = spawn(launch.command, launch.args, {
         cwd,
-        env: { ...process.env, ...env },
+        env: childEnv,
         detached: process.platform !== "win32",
         stdio: ["pipe", "pipe", "pipe"],
+        windowsHide: true,
+        ...launch.options,
       });
     } catch (error) {
       resolve({ ...baseResult, durationMs: Date.now() - startedAt, error: String(error?.message || error) });
@@ -523,9 +539,17 @@ async function execute(command, args, cwd, timeoutMs, env = {}, options = {}) {
       try { child.stdout?.destroy(); } catch {}
       try { child.stderr?.destroy(); } catch {}
     };
+    // No process groups on Windows: the run owns the process tree it started.
+    // snapshot: false keeps a blocking process snapshot off Pi's event loop.
+    let windowsOwnership = null;
+    if (child.pid && process.platform === "win32") {
+      try { windowsOwnership = ownProcessGroup(child, { spawnedAt: startedAt, snapshot: false }); } catch {}
+    }
     const killTree = (killSignal) => {
       if (child.pid && process.platform !== "win32") {
         try { process.kill(-child.pid, killSignal); } catch {}
+      } else if (windowsOwnership) {
+        try { signalOwnedProcessGroup(windowsOwnership, killSignal); } catch {}
       }
       try { child.kill(killSignal); } catch {}
     };
@@ -575,6 +599,12 @@ async function execute(command, args, cwd, timeoutMs, env = {}, options = {}) {
       if (settled) return;
       settled = true;
       clearTimers();
+      // On Windows child.kill() ends only the root at once, its pipes close and
+      // the run settles before the KILL escalation; POSIX already signalled the
+      // whole group. End what is left of a stopped run's tree here.
+      if (windowsOwnership && (cancelled || timedOut || resourceLimitExceeded || overflowStream)) {
+        try { signalOwnedProcessGroup(windowsOwnership, "SIGKILL"); } catch {}
+      }
       signal?.removeEventListener?.("abort", onAbort);
       const stdout = Buffer.concat(stdoutChunks, stdoutBytes).toString("utf8");
       const stderr = Buffer.concat(stderrChunks, stderrBytes).toString("utf8");
@@ -590,7 +620,8 @@ async function execute(command, args, cwd, timeoutMs, env = {}, options = {}) {
         status,
         signal: exitSignal,
         ok: status === 0 && !spawnError && !timedOut && !cancelled && !overflowStream && !resourceLimitExceeded,
-        crashed: status === 134 || exitSignal === "SIGABRT",
+        // Windows reports crashes as NTSTATUS exit codes (0xC0000005 access violation, 0xC0000409 abort).
+        crashed: status === 134 || exitSignal === "SIGABRT" || (process.platform === "win32" && status >= 0xC0000000),
         timedOut,
         cancelled,
         outputLimitExceeded: Boolean(overflowStream),
@@ -625,9 +656,9 @@ async function execute(command, args, cwd, timeoutMs, env = {}, options = {}) {
       emitProgress();
     };
 
-    if (process.platform !== "win32") {
+    if (process.platform !== "win32" || windowsOwnership) {
       try {
-        const ownership = ownProcessGroup(child);
+        const ownership = windowsOwnership || ownProcessGroup(child);
         rssMonitor = watchOwnedProcessGroupRss(ownership, {
           limitBytes: guardConfig.rssLimitBytes,
           pollMs: guardConfig.rssPollMs,
@@ -819,8 +850,9 @@ async function runTestsManaged(cwd = process.cwd(), options = {}) {
   for (const binary of config.test.binaries) {
     const absolute = path.isAbsolute(binary) ? binary : path.join(cwd, binary);
     // Pinned binaries in unbuilt trees are skipped, not failed: root build/
-    // directories come and go on large repos.
-    if (!fs.existsSync(absolute)) {
+    // directories come and go on large repos. On Windows a pin may omit the
+    // extension (build/foo-tests -> foo-tests.exe), as on a command line.
+    if (!fs.existsSync(absolute) && !(process.platform === "win32" && findExecutable(absolute).found)) {
       skippedBinaries.push(binary);
       continue;
     }

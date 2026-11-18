@@ -67,10 +67,17 @@ function waitDelay(ms) {
  * any group) anchors to that process's current creation time; termination
  * still requires ownership via requireOwnedGroup.
  */
-function windowsTree(pgid) {
+function windowsTree(pgid, processes = winTree.snapshot()) {
   const owned = WIN_OWNED.get(pgid);
-  if (owned) return winTree.treeMembers(pgid, owned);
-  const processes = winTree.snapshot();
+  if (owned) {
+    const members = winTree.treeMembers(pgid, owned, processes);
+    // Ownership taken without a snapshot pins the root's identity on first sight.
+    if (!owned.startTime) {
+      const root = members.find((item) => item.pid === pgid);
+      if (root) owned.startTime = root.created;
+    }
+    return members;
+  }
   const current = winTree.identity(pgid, processes);
   return current ? winTree.treeMembers(pgid, { startTime: current.startTime }, processes) : [];
 }
@@ -119,13 +126,15 @@ function processGroupAlive(processGroupId) {
   return processGroupRss(processGroupId).members > 0;
 }
 
-function ownProcessGroup(child, { spawnedAt = Date.now() } = {}) {
+function ownProcessGroup(child, { spawnedAt = Date.now(), snapshot = true } = {}) {
   const pgid = Number(child?.pid);
   if (!Number.isInteger(pgid) || pgid <= 0) throw new Error("owned process group requires a spawned child pid");
   if (winTree) {
     // The root may already have exited (fast commands); its spawn time still
-    // bounds which processes can belong to the job.
-    const identity = winTree.identity(pgid);
+    // bounds which processes can belong to the job. Callers inside Pi's own
+    // process pass snapshot: false to skip the blocking snapshot; the identity
+    // is then pinned by the first tree lookup.
+    const identity = snapshot ? winTree.identity(pgid) : null;
     const owned = { startTime: identity?.startTime || null, notBefore: winTree.fileTime(spawnedAt - 2000) };
     WIN_OWNED.set(pgid, owned);
     return Object.freeze({ [OWNED_GROUP]: true, processGroupId: pgid, startTime: owned.startTime });
@@ -133,6 +142,20 @@ function ownProcessGroup(child, { spawnedAt = Date.now() } = {}) {
   const identity = processIdentity(pgid);
   if (!identity || identity.processGroupId !== pgid) throw new Error("owned process group requires a detached group-leader child");
   return Object.freeze({ [OWNED_GROUP]: true, processGroupId: pgid, startTime: identity.startTime });
+}
+
+/**
+ * Sends one signal to every member of an owned group, synchronously. On Windows
+ * SIGKILL is taskkill /F and anything else a polite taskkill, over the job tree.
+ */
+function signalOwnedProcessGroup(ownership, signal = "SIGTERM") {
+  const pgid = requireOwnedGroup(ownership);
+  if (winTree) {
+    const members = windowsTree(pgid).map((item) => item.pid);
+    if (members.length) winTree.killProcesses(members, { force: signal === "SIGKILL" });
+    return members.length > 0;
+  }
+  try { process.kill(-pgid, signal); return true; } catch { return false; }
 }
 
 function requireOwnedGroup(ownership) {
@@ -194,6 +217,35 @@ function watchOwnedProcessGroupRss(ownership, options = {}) {
   let stopped = false;
   let exceeded = false;
   let peakRssBytes = 0;
+  if (winTree) {
+    // Snapshots are taken asynchronously so a monitor running inside Pi (builds,
+    // subagents) never blocks its event loop; one snapshot is in flight at a time.
+    let inFlight = false;
+    let last = { processGroupId: pgid, rssBytes: 0, members: 0 };
+    const sampleAsync = async () => {
+      if (stopped || inFlight) return;
+      inFlight = true;
+      try {
+        const processes = await winTree.snapshotAsync();
+        if (stopped) return;
+        const members = windowsTree(pgid, processes);
+        last = { processGroupId: pgid, rssBytes: members.reduce((sum, item) => sum + item.rssBytes, 0), members: members.length };
+        peakRssBytes = Math.max(peakRssBytes, last.rssBytes);
+        options.onSample?.({ ...last, peakRssBytes, limitBytes });
+        if (!exceeded && last.rssBytes > limitBytes) {
+          exceeded = true;
+          options.onExceeded?.({ ...last, peakRssBytes, limitBytes });
+        }
+      } finally { inFlight = false; }
+    };
+    const timer = setInterval(() => { sampleAsync().catch(() => {}); }, pollMs);
+    timer.unref?.();
+    setImmediate(() => { sampleAsync().catch(() => {}); }).unref?.();
+    return {
+      sample: () => ({ ...last, peakRssBytes, exceeded }),
+      stop() { stopped = true; clearInterval(timer); return { peakRssBytes, exceeded }; },
+    };
+  }
   const sample = () => {
     if (stopped) return { ...processGroupRss(pgid), peakRssBytes, exceeded };
     const usage = processGroupRss(pgid, { includeDescendants: options.includeDescendants === true });
@@ -214,8 +266,70 @@ function watchOwnedProcessGroupRss(ownership, options = {}) {
   };
 }
 
+// Windows has no flock. A named pipe is the lock instead: only one server can
+// own a pipe name (machine-wide, across processes and within one), and Windows
+// frees it when the owning process exits or crashes, as flock frees on close.
+// The name is derived from the user and the lock file path.
+function windowsLockPipe(file) {
+  const digest = crypto.createHash("sha256").update(`${os.userInfo().username}\0${path.resolve(file).toLowerCase()}`).digest("hex").slice(0, 32);
+  return `\\\\.\\pipe\\pi-managed-worker-${digest}`;
+}
+
+function tryWindowsLock(file) {
+  return new Promise((resolve) => {
+    const net = require("node:net");
+    const server = net.createServer((socket) => socket.destroy());
+    server.once("error", () => resolve(null));
+    server.listen(windowsLockPipe(file), () => { server.unref(); resolve(server); });
+  });
+}
+
+async function acquireManagedWorkerWindows(root, limit) {
+  // The default root is under the per-user %TEMP%; Windows ACLs, not mode bits,
+  // keep it private, so only the shape of the directory is checked.
+  fs.mkdirSync(root, { recursive: true });
+  const directory = fs.lstatSync(root);
+  if (!directory.isDirectory() || directory.isSymbolicLink()) throw new Error("unsafe managed worker directory");
+  if (root === WORKER_ROOT && process.env.PI_ROLE_SIDECAR === "1" && process.env.PI_MANAGED_WORKER_TOKEN) {
+    const slot = process.env.PI_MANAGED_WORKER_SLOT;
+    if (!/^[01]$/.test(slot || "")) throw new Error("invalid inherited managed worker slot");
+    const file = path.join(root, `worker-${slot}.lock`), stat = fs.lstatSync(file);
+    if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("unsafe inherited managed worker lease");
+    const lease = JSON.parse(fs.readFileSync(file, "utf8"));
+    const probe = await tryWindowsLock(file);
+    if (probe) await new Promise((resolve) => probe.close(resolve));
+    if (probe || lease.token !== process.env.PI_MANAGED_WORKER_TOKEN) throw new Error("inherited managed worker lease is no longer owned");
+    if (inheritedWorkerBusy) throw Object.assign(new Error("inherited managed worker is busy"), { code: "MANAGED_WORKER_CAPACITY" });
+    inheritedWorkerBusy = true;
+    let released = false;
+    return { release() { if (released) return; released = true; inheritedWorkerBusy = false; } };
+  }
+  for (let index = 0; index < limit; index++) {
+    const file = path.join(root, `worker-${index}.lock`);
+    const server = await tryWindowsLock(file);
+    if (!server) continue;
+    try {
+      const existing = fs.existsSync(file) ? fs.lstatSync(file) : null;
+      if (existing && (!existing.isFile() || existing.isSymbolicLink())) throw new Error("unsafe managed worker lock");
+      const token = crypto.randomBytes(24).toString("hex");
+      fs.writeFileSync(file, JSON.stringify({ token }), { mode: 0o600 });
+      let released = false;
+      return { environment: { PI_MANAGED_WORKER_SLOT: String(index), PI_MANAGED_WORKER_TOKEN: token }, async release() {
+        if (released) return; released = true;
+        try { fs.writeFileSync(file, ""); } catch {}
+        await new Promise((resolve) => server.close(resolve));
+      } };
+    } catch (error) {
+      await new Promise((resolve) => server.close(resolve));
+      throw error;
+    }
+  }
+  throw Object.assign(new Error("user-wide managed worker capacity exhausted"), { code: "MANAGED_WORKER_CAPACITY" });
+}
+
 async function acquireManagedWorker({ root = WORKER_ROOT, limit = 2 } = {}) {
   if (!Number.isInteger(limit) || limit < 1 || limit > 2) throw new Error("managed worker limit must be 1 or 2");
+  if (winTree) return acquireManagedWorkerWindows(root, limit);
   fs.mkdirSync(root, { recursive: true, mode: 0o700 });
   const directory = fs.lstatSync(root);
   if (!directory.isDirectory() || directory.isSymbolicLink() || directory.uid !== process.getuid?.() || (directory.mode & 0o077)) throw new Error("unsafe managed worker directory");
@@ -271,6 +385,7 @@ module.exports = {
   processIdentity,
   processTreeMembers,
   resourceGuardConfig,
+  signalOwnedProcessGroup,
   terminateOwnedProcessGroup,
   watchOwnedProcessGroupRss,
 };

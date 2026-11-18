@@ -34,6 +34,17 @@ function mkCommandRepo(args, build = {}) {
   });
 }
 
+// A stand-in test binary: a shell script on POSIX; on Windows (no shebangs, no
+// mode bits) a .cmd script next to the extensionless name, found via PATHEXT.
+function writeTestBinary(file, shScript, cmdScript) {
+  if (process.platform === "win32") {
+    fs.writeFileSync(`${file}.cmd`, cmdScript.replace(/\n/g, "\r\n"));
+    return;
+  }
+  fs.writeFileSync(file, shScript);
+  fs.chmodSync(file, 0o755);
+}
+
 async function waitFor(predicate, timeoutMs = 2_000) {
   const deadline = Date.now() + timeoutMs;
   while (!predicate()) {
@@ -66,21 +77,25 @@ assert.ok(pinnedFacts.facts.some((fact) => fact.object === "build-target:engine"
 assert.ok(pinnedFacts.facts.every((fact) => !JSON.stringify(fact).includes("make -j4")), "raw commands must not be exposed as facts");
 
 // CMake detection: CMakeLists + build dir => cmake --build; test binaries under build/.
+// Windows marks executables by extension (PATHEXT), not mode bits, and cannot run
+// a shebang script, so the stand-in test binary is a .cmd script there.
+const win32 = process.platform === "win32";
+const testBinaryName = win32 ? "demo-unit-tests.cmd" : "demo-unit-tests";
 const cmake = mkRepo((dir) => {
   fs.writeFileSync(path.join(dir, "CMakeLists.txt"), "project(demo)\n");
   fs.writeFileSync(path.join(dir, "configure.sh"), "#!/bin/sh\n");
   fs.mkdirSync(path.join(dir, "build"), { recursive: true });
-  fs.writeFileSync(path.join(dir, "build", "demo-unit-tests"), "#!/bin/sh\necho ok\n");
-  fs.chmodSync(path.join(dir, "build", "demo-unit-tests"), 0o755);
+  fs.writeFileSync(path.join(dir, "build", testBinaryName), win32 ? "@echo ok\r\n" : "#!/bin/sh\necho ok\n");
+  fs.chmodSync(path.join(dir, "build", testBinaryName), 0o755);
 });
 const cmakeCfg = resolveBuildConfig(cmake);
 assert.equal(cmakeCfg.source, "detected");
 assert.equal(cmakeCfg.build.command, "cmake");
 assert.deepEqual(cmakeCfg.build.args.slice(0, 2), ["--build", "build"]);
 assert.ok(cmakeCfg.configure && /configure\.sh$/.test(cmakeCfg.configure.script), "configure.sh is detected");
-assert.deepEqual(cmakeCfg.test.binaries, ["build/demo-unit-tests"], "detected test binaries are repository-relative");
+assert.deepEqual(cmakeCfg.test.binaries, [`build/${testBinaryName}`], "detected test binaries are repository-relative");
 const cmakeTestFact = pinnedBuildFacts(cmake).facts.find((fact) => fact.predicate === "tests");
-assert.equal(cmakeTestFact.path, "build/demo-unit-tests", "build facts preserve the repository-relative path contract");
+assert.equal(cmakeTestFact.path, `build/${testBinaryName}`, "build facts preserve the repository-relative path contract");
 assert.equal(path.isAbsolute(cmakeTestFact.path), false);
 
 // A repository-local configure-only pin augments CMake detection instead of
@@ -359,8 +374,9 @@ process.env.PI_BUILD_ALLOW_LOW_MEMORY = "1";
   const crash = mkRepo((dir) => {
     fs.writeFileSync(path.join(dir, "CMakeLists.txt"), "project(x)\n");
     fs.mkdirSync(path.join(dir, "build"), { recursive: true });
-    fs.writeFileSync(path.join(dir, "build", "x-unit-tests"), "#!/bin/sh\necho boom >&2\nexit 134\n");
-    fs.chmodSync(path.join(dir, "build", "x-unit-tests"), 0o755);
+    const crashName = win32 ? "x-unit-tests.cmd" : "x-unit-tests";
+    fs.writeFileSync(path.join(dir, "build", crashName), win32 ? "@echo boom 1>&2\r\n@exit /b 134\r\n" : "#!/bin/sh\necho boom >&2\nexit 134\n");
+    fs.chmodSync(path.join(dir, "build", crashName), 0o755);
   });
   const c = await runTests(crash, {});
   assert.equal(c.ok, false);
@@ -372,8 +388,7 @@ process.env.PI_BUILD_ALLOW_LOW_MEMORY = "1";
   const partial = mkRepo((dir) => {
     fs.mkdirSync(path.join(dir, ".pi"), { recursive: true });
     fs.mkdirSync(path.join(dir, "present"), { recursive: true });
-    fs.writeFileSync(path.join(dir, "present", "ok-tests"), "#!/bin/sh\necho fine\n");
-    fs.chmodSync(path.join(dir, "present", "ok-tests"), 0o755);
+    writeTestBinary(path.join(dir, "present", "ok-tests"), "#!/bin/sh\necho fine\n", "@echo fine\n");
     fs.writeFileSync(path.join(dir, ".pi", "project.json"), JSON.stringify({
       test: { binaries: ["present/ok-tests", "missing/not-built-tests"] },
     }));
@@ -389,12 +404,13 @@ process.env.PI_BUILD_ALLOW_LOW_MEMORY = "1";
   const flaky = mkRepo((dir) => {
     fs.writeFileSync(path.join(dir, "CMakeLists.txt"), "project(f)\n");
     fs.mkdirSync(path.join(dir, "build"), { recursive: true });
-    fs.writeFileSync(path.join(dir, "build", "f-unit-tests"), `#!/bin/sh
+    writeTestBinary(path.join(dir, "build", "f-unit-tests"), `#!/bin/sh
 marker="$(dirname "$0")/first-run"
 if [ ! -f "$marker" ]; then touch "$marker"; echo "intermittent failure" >&2; exit 1; fi
 echo "passed on retry"
+`, `@if not exist "%~dp0first-run" (type nul > "%~dp0first-run" & echo intermittent failure 1>&2 & exit /b 1)
+@echo passed on retry
 `);
-    fs.chmodSync(path.join(dir, "build", "f-unit-tests"), 0o755);
   });
   const f = await runTests(flaky, {});
   assert.equal(f.ok, true, "flaky test passes after auto-retry");
@@ -405,8 +421,7 @@ echo "passed on retry"
   const flaky2 = mkRepo((dir) => {
     fs.writeFileSync(path.join(dir, "CMakeLists.txt"), "project(f2)\n");
     fs.mkdirSync(path.join(dir, "build"), { recursive: true });
-    fs.writeFileSync(path.join(dir, "build", "f2-unit-tests"), "#!/bin/sh\nexit 1\n");
-    fs.chmodSync(path.join(dir, "build", "f2-unit-tests"), 0o755);
+    writeTestBinary(path.join(dir, "build", "f2-unit-tests"), "#!/bin/sh\nexit 1\n", "@exit /b 1\n");
   });
   const f2 = await runTests(flaky2, { retryFlaky: false });
   assert.equal(f2.ok, false);
@@ -510,8 +525,7 @@ fi
     fs.mkdirSync(path.join(dir, ".pi"), { recursive: true });
     fs.mkdirSync(path.join(dir, "build"));
     const fakeCmake = path.join(dir, "cmake");
-    fs.writeFileSync(fakeCmake, "#!/bin/sh\nprintf '%s\\n' \"$@\" > invoked-args.txt\n");
-    fs.chmodSync(fakeCmake, 0o755);
+    writeTestBinary(fakeCmake, "#!/bin/sh\nprintf '%s\\n' \"$@\" > invoked-args.txt\n", "@(for %%a in (%*) do @echo %%~a) > invoked-args.txt\n");
     fs.writeFileSync(path.join(dir, ".pi", "project.json"), JSON.stringify({
       build: { command: fakeCmake, args: ["--build", "build", "--parallel"], targetArg: "--target", maxJobs: 1 },
     }));
@@ -527,7 +541,7 @@ fi
   }
   assert.equal(cappedRun.ok, true);
   assert.deepEqual(cappedRun.args.slice(0), ["--build", "build", "--parallel", "1", "--target", "demo"]);
-  assert.deepEqual(fs.readFileSync(path.join(cappedCmake, "invoked-args.txt"), "utf8").trim().split("\n"), cappedRun.args);
+  assert.deepEqual(fs.readFileSync(path.join(cappedCmake, "invoked-args.txt"), "utf8").trim().split(/\r?\n/), cappedRun.args);
 
   // runBuild uses the pinned command.
   const pinnedBuild = mkRepo((dir) => {
