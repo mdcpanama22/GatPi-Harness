@@ -5,13 +5,15 @@ const path = require("node:path");
 
 let createTraceRuntime;
 let evaluatePolicy;
+// normalizePathValue maps Git Bash /c/... paths to C:\... on Windows (no-op elsewhere).
+let normalizePathValue = (value) => value;
 try {
   ({ createTraceRuntime } = require("../../../src/trace-observability.js"));
 } catch {
   createTraceRuntime = undefined;
 }
 try {
-  ({ evaluatePolicy } = require("../../../src/runtime-policy.js"));
+  ({ evaluatePolicy, normalizePathValue } = require("../../../src/runtime-policy.js"));
 } catch {
   evaluatePolicy = undefined;
 }
@@ -218,15 +220,23 @@ function isNegatedWriteReference(text, verbIndex) {
   return /\b(?:do\s+not|don't|dont|never|avoid|without)\b/i.test(prefix);
 }
 
+// POSIX: absolute paths start with "/". Windows adds drive paths (C:\ or C:/),
+// UNC paths (\\server\share) and Git Bash drive paths (/c/...); dots are kept
+// inside Windows paths (C:\Users\john.doe) and trimmed only at the end.
+const POSIX_WRITE_PATH = /\b(?:write|edit|modify|create|delete)\b(?!-)[^\n]*?(?<![\w.-])(\/[^\s'"`),.;]+)/gi;
+const WINDOWS_WRITE_PATH = /\b(?:write|edit|modify|create|delete)\b(?!-)[^\n]*?(?<![\w.-])((?:[A-Za-z]:[\\/]|\\\\|\/)[^\s'"`),;]+)/gi;
+
 function findWriteLikeOutsideRepoPath(text, cwd) {
   if (!cwd) return undefined;
   const repo = path.resolve(cwd);
-  const writePathPattern = /\b(?:write|edit|modify|create|delete)\b(?!-)[^\n]*?(?<![\w.-])(\/[^\s'"`),.;]+)/gi;
+  const win = process.platform === "win32";
+  const writePathPattern = new RegExp(win ? WINDOWS_WRITE_PATH : POSIX_WRITE_PATH);
   let match;
   while ((match = writePathPattern.exec(text)) !== null) {
     if (isNegatedWriteReference(text, match.index)) continue;
-    const abs = match[1];
-    if (!isWithinPath(path.resolve(abs), repo)) return abs;
+    const abs = win ? match[1].replace(/[.]+$/, "") : match[1];
+    const resolved = path.resolve(win ? normalizePathValue(abs) : abs);
+    if (!isWithinPath(resolved, repo)) return abs;
   }
   return undefined;
 }

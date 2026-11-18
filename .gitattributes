@@ -1,0 +1,9 @@
+# Keep text files LF on every platform. Some code and tests read, compare and
+# hash their own source; with core.autocrlf=true (the Git for Windows default)
+# a Windows checkout would otherwise be CRLF and differ from Linux.
+* text=auto eol=lf
+
+# Windows-only scripts keep CRLF.
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
