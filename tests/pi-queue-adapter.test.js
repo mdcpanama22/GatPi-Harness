@@ -4,6 +4,18 @@ const { tmpFixture } = require("./helpers/tmp-fixture");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
+const { execFileSync } = require("node:child_process");
+
+// Windows has no POSIX mode bits; privacy is the file's ACL (see src/pi-queue/config.js).
+const win32 = process.platform === "win32";
+const icacls = (...args) => execFileSync("icacls", args, { stdio: "ignore", windowsHide: true });
+const loosen = (file) => (win32 ? icacls(file, "/grant", "*S-1-1-0:(R)") : fs.chmodSync(file, 0o644));
+// Windows: drop inherited ACEs (temp dirs can carry extra principals) and grant only the user.
+const tighten = (file) => {
+  if (!win32) return fs.chmodSync(file, 0o600);
+  icacls(file, "/remove", "*S-1-1-0");
+  icacls(file, "/inheritance:r", "/grant:r", `${process.env.USERNAME}:F`);
+};
 
 (async () => {
   const adapter = require("../src/pi-queue-adapter.js");
@@ -35,13 +47,13 @@ const path = require("node:path");
       assert.equal(adapter.queueReadiness({ env }).outcome, "not-installed", "The install check takes precedence over a valid configuration");
     } else {
       fs.writeFileSync(file, body, { mode: 0o644 });
-      fs.chmodSync(file, 0o644); // The mode option is masked by the process umask.
+      loosen(file); // POSIX: chmod 644 (the mode option is masked by umask). Windows: grant Everyone read.
       const loose = adapter.queueReadiness({ env });
       assert.equal(loose.outcome, "invalid-config", "World-readable credentials are rejected");
       assert(!JSON.stringify(loose).includes(secret));
       await assert.rejects(adapter.acquireModelSlot({}, { env }), (error) => !error.message.includes(secret) && /invalid-config/.test(error.message));
 
-      fs.chmodSync(file, 0o600);
+      tighten(file);
       assert.equal(adapter.queueReadiness({ env }).outcome, "ready");
       fs.writeFileSync(file, body.replace(`${home}/ca.crt`, "ca.crt"), { mode: 0o600 });
       assert.equal(adapter.queueReadiness({ env }).outcome, "invalid-config", "Certificate paths must be absolute");
