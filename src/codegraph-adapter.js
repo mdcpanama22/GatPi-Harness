@@ -6,7 +6,7 @@ const crypto = require("node:crypto");
 const { execFile, execFileSync, spawnSync } = require("node:child_process");
 const { readChangeSet, readChangeSetAsync, runGitAsync, workingTreeRevision, revisionId, fileContentIdentity, sourceKindForPath } = require("./code-context-revision.js");
 const { assertProjectScope, projectScope, owningRoot } = require("./project-scope.js");
-const { findExecutable } = require("./win-exec.js");
+const { findExecutable, resolveSpawn } = require("./win-exec.js");
 const {
   codegraphQueryEnvelope,
   codegraphAffectedEnvelope,
@@ -336,7 +336,10 @@ function codegraphEnv() {
 function runCodegraphSync(cwd, args, options = {}) {
   const config = configFromEnv(process.env, options);
   try {
-    const stdout = execFileSync(config.bin, args, { cwd, encoding: "utf8", timeout: options.timeoutMs || config.advisoryTimeoutMs, maxBuffer: config.maxBuffer, env: codegraphEnv(), stdio: ["ignore", "pipe", "pipe"] });
+    // codegraph is an npm package: a .cmd shim on Windows that needs cmd.exe.
+    const env = codegraphEnv();
+    const launch = resolveSpawn(config.bin, args, env);
+    const stdout = execFileSync(launch.command, launch.args, { cwd, encoding: "utf8", timeout: options.timeoutMs || config.advisoryTimeoutMs, maxBuffer: config.maxBuffer, env, stdio: ["ignore", "pipe", "pipe"], ...launch.options });
     return { ok: true, code: 0, stdout: stripAnsi(stdout || ""), stderr: "", args, command: commandText(config.bin, args), cwd };
   } catch (error) {
     const stdout = stripAnsi(String(error?.stdout || ""));
@@ -592,13 +595,16 @@ function createCodegraphAdapter(overrides = {}) {
   const config = configFromEnv(process.env, overrides);
   async function runCodegraph(ctx, args, signal, timeoutMs = config.timeoutMs, options = {}) {
     return new Promise((resolvePromise, reject) => {
-      execFile(config.bin, args, {
+      const env = codegraphEnv();
+      const launch = resolveSpawn(config.bin, args, env);
+      execFile(launch.command, launch.args, {
         cwd: ctx.cwd,
         encoding: "utf8",
         timeout: timeoutMs,
         maxBuffer: config.maxBuffer,
         signal,
-        env: codegraphEnv(),
+        env,
+        ...launch.options,
       }, (error, stdout = "", stderr = "") => {
         const result = { stdout: stripAnsi(String(stdout || "")), stderr: stripAnsi(String(stderr || "")), args, command: commandText(config.bin, args), cwd: ctx.cwd };
         const output = `${result.stdout}\n${result.stderr}`.trim();
@@ -801,6 +807,7 @@ module.exports = {
   clampNumber,
   configFromEnv,
   createCodegraphAdapter,
+  runCodegraphSync,
   codegraphAffectedTests,
   codegraphProjectSnapshot,
   codegraphDoctor,

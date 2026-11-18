@@ -6,6 +6,7 @@ const os = require("node:os");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const { execFile } = require("node:child_process");
+const { findExecutable, resolveSpawn } = require("./win-exec.js");
 const { createCard, createRetrievalEnvelope, sourceKindForPath } = require("./code-context-contracts.js");
 const { workingTreeRevision, revisionId } = require("./code-context-revision.js");
 
@@ -91,9 +92,24 @@ function buildArgs(root, params, internalLimit) {
   for (const searchPath of paths) args.push(normalizeSearchPath(root, searchPath));
   return { args, mode };
 }
+/**
+ * ripgrep to run: PI_CODE_CONTEXT_RG_BIN, else rg on PATH, else the copy Pi
+ * downloads into <agent dir>/bin (Pi's grep tool installs it there; on Windows
+ * rg is rarely on PATH), else plain "rg" so the error names what is missing.
+ */
+function resolveRgBin(env = process.env) {
+  if (env.PI_CODE_CONTEXT_RG_BIN) return env.PI_CODE_CONTEXT_RG_BIN;
+  if (findExecutable("rg", env).found) return "rg";
+  const agentDir = env.PI_CODING_AGENT_DIR || path.join(os.homedir(), ".pi", "agent");
+  const managed = path.join(agentDir, "bin", process.platform === "win32" ? "rg.exe" : "rg");
+  return fs.existsSync(managed) ? managed : "rg";
+}
 function runRg(root, args, options = {}) {
   return new Promise((resolve, reject) => {
-    execFile(options.bin || "rg", args, { cwd: root, encoding: "utf8", timeout: options.timeoutMs || 30000, maxBuffer: options.maxBuffer || 20 * 1024 * 1024, signal: options.signal, env: { ...process.env, NO_COLOR: "1", FORCE_COLOR: "0" } }, (error, stdout = "", stderr = "") => {
+    const env = { ...process.env, NO_COLOR: "1", FORCE_COLOR: "0" };
+    // resolveSpawn: .cmd shims run through cmd.exe on Windows; POSIX unchanged.
+    const launch = resolveSpawn(options.bin || resolveRgBin(), args, env);
+    execFile(launch.command, launch.args, { cwd: root, encoding: "utf8", timeout: options.timeoutMs || 30000, maxBuffer: options.maxBuffer || 20 * 1024 * 1024, signal: options.signal, env, ...launch.options }, (error, stdout = "", stderr = "") => {
       if (!error || error.code === 1) return resolve({ ok: true, stdout, stderr, code: error?.code || 0 });
       if (error.name === "AbortError" || error.code === "ABORT_ERR") return reject(error);
       const failure = new Error(`ripgrep failed: ${String(stderr || error.message).trim()}`);
@@ -103,7 +119,7 @@ function runRg(root, args, options = {}) {
   });
 }
 function createLexicalSearchAdapter(overrides = {}) {
-  const config = { bin: overrides.bin || process.env.PI_CODE_CONTEXT_RG_BIN || "rg", timeoutMs: Number(overrides.timeoutMs || process.env.PI_CODE_CONTEXT_RG_TIMEOUT_MS || 30000), maxBuffer: Number(overrides.maxBuffer || 20 * 1024 * 1024), internalLimit: clamp(overrides.internalLimit || process.env.PI_CODE_CONTEXT_RG_INTERNAL_LIMIT, 2000, 20000), defaultLimit: clamp(overrides.defaultLimit || process.env.PI_CODE_CONTEXT_SEARCH_LIMIT, 15, 100) };
+  const config = { bin: overrides.bin || resolveRgBin(), timeoutMs: Number(overrides.timeoutMs || process.env.PI_CODE_CONTEXT_RG_TIMEOUT_MS || 30000), maxBuffer: Number(overrides.maxBuffer || 20 * 1024 * 1024), internalLimit: clamp(overrides.internalLimit || process.env.PI_CODE_CONTEXT_RG_INTERNAL_LIMIT, 2000, 20000), defaultLimit: clamp(overrides.defaultLimit || process.env.PI_CODE_CONTEXT_SEARCH_LIMIT, 15, 100) };
   async function search(root, params = {}, signal) {
     const projectPath = path.resolve(root);
     const started = Date.now();
@@ -138,4 +154,4 @@ function createLexicalSearchAdapter(overrides = {}) {
   return { config, search };
 }
 
-module.exports = { createLexicalSearchAdapter, parseRgJson, dedupeAndRank, classifyScore, normalizeSearchPath, cursorEncode, cursorDecode, runRg };
+module.exports = { createLexicalSearchAdapter, parseRgJson, dedupeAndRank, classifyScore, normalizeSearchPath, cursorEncode, cursorDecode, runRg, resolveRgBin };
