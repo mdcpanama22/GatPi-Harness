@@ -7,9 +7,13 @@ const { spawn, spawnSync } = require("node:child_process");
 const crypto = require("node:crypto");
 const WORKER_ROOT = path.join(os.tmpdir(), `pi-managed-workers-${process.getuid?.() ?? "user"}`);
 let inheritedWorkerBusy = false;
+// Windows has no /proc or process groups: jobs are process trees (win-process-tree.js).
+const winTree = process.platform === "win32" ? require("./win-process-tree.js") : null;
+const WIN_OWNED = new Map(); // root pid -> { startTime, notBefore }
 
 const DEFAULT_RSS_LIMIT_MB = 6 * 1024;
-const DEFAULT_RSS_POLL_MS = 2_000;
+// A Windows process snapshot costs ~0.5 s, so poll less often there.
+const DEFAULT_RSS_POLL_MS = winTree ? 5_000 : 2_000;
 const DEFAULT_TERM_GRACE_MS = 5_000;
 const OWNED_GROUP = Symbol("pi-harness-owned-process-group");
 
@@ -44,6 +48,7 @@ function parseProcStat(text) {
 function processIdentity(pid) {
   const numericPid = Number(pid);
   if (!Number.isInteger(numericPid) || numericPid <= 0) return null;
+  if (winTree) return winTree.identity(numericPid);
   try {
     const parsed = parseProcStat(fs.readFileSync(`/proc/${numericPid}/stat`, "utf8"));
     return parsed ? { pid: numericPid, startTime: parsed.startTime, state: parsed.state, processGroupId: parsed.processGroupId } : null;
@@ -56,9 +61,37 @@ function waitDelay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * Windows: live members of a process tree. An owned tree uses the identity
+ * recorded at launch. Measuring an unowned PID (read-only, like POSIX RSS for
+ * any group) anchors to that process's current creation time; termination
+ * still requires ownership via requireOwnedGroup.
+ */
+function windowsTree(pgid) {
+  const owned = WIN_OWNED.get(pgid);
+  if (owned) return winTree.treeMembers(pgid, owned);
+  const processes = winTree.snapshot();
+  const current = winTree.identity(pgid, processes);
+  return current ? winTree.treeMembers(pgid, { startTime: current.startTime }, processes) : [];
+}
+
+/** PIDs in an owned job tree (Windows) or process group (POSIX). */
+function processTreeMembers(processGroupId) {
+  const pgid = Number(processGroupId);
+  if (winTree) return windowsTree(pgid).map((item) => item.pid);
+  let names = [];
+  try { names = fs.readdirSync("/proc").filter((name) => /^\d+$/.test(name)); } catch {}
+  return names.map(Number).filter((pid) => processIdentity(pid)?.processGroupId === pgid);
+}
+
 function processGroupRss(processGroupId, { includeDescendants = false } = {}) {
   const pgid = Number(processGroupId);
   if (!Number.isInteger(pgid) || pgid <= 0) return { processGroupId: pgid, rssBytes: 0, members: 0 };
+  if (winTree) {
+    // A Windows job tree always includes descendants (there is no group to limit it).
+    const members = windowsTree(pgid);
+    return { processGroupId: pgid, rssBytes: members.reduce((sum, item) => sum + item.rssBytes, 0), members: members.length };
+  }
   let names = [];
   try { names = fs.readdirSync("/proc").filter((name) => /^\d+$/.test(name)); } catch {}
   let rssBytes = 0;
@@ -86,9 +119,17 @@ function processGroupAlive(processGroupId) {
   return processGroupRss(processGroupId).members > 0;
 }
 
-function ownProcessGroup(child) {
+function ownProcessGroup(child, { spawnedAt = Date.now() } = {}) {
   const pgid = Number(child?.pid);
   if (!Number.isInteger(pgid) || pgid <= 0) throw new Error("owned process group requires a spawned child pid");
+  if (winTree) {
+    // The root may already have exited (fast commands); its spawn time still
+    // bounds which processes can belong to the job.
+    const identity = winTree.identity(pgid);
+    const owned = { startTime: identity?.startTime || null, notBefore: winTree.fileTime(spawnedAt - 2000) };
+    WIN_OWNED.set(pgid, owned);
+    return Object.freeze({ [OWNED_GROUP]: true, processGroupId: pgid, startTime: owned.startTime });
+  }
   const identity = processIdentity(pgid);
   if (!identity || identity.processGroupId !== pgid) throw new Error("owned process group requires a detached group-leader child");
   return Object.freeze({ [OWNED_GROUP]: true, processGroupId: pgid, startTime: identity.startTime });
@@ -106,6 +147,35 @@ async function terminateOwnedProcessGroup(ownership, options = {}) {
   const signals = [];
   let termSent = false;
   let killSent = false;
+  if (winTree) {
+    // No signals on Windows: a polite taskkill (closes windowed programs), then
+    // taskkill /F for every remaining member of the owned tree. Signal names are
+    // kept in the result for compatibility with the POSIX evidence format.
+    // termSent reports the request, as on POSIX; console programs usually refuse
+    // a polite taskkill, which is what the grace period and /F escalation are for.
+    const members = windowsTree(pgid).map((item) => item.pid);
+    if (members.length) { winTree.killProcesses(members, { force: false }); termSent = true; signals.push("SIGTERM"); }
+    const deadline = Date.now() + graceMs;
+    while (processGroupAlive(pgid) && Date.now() < deadline) await waitDelay(Math.min(pollMs, Math.max(1, deadline - Date.now())));
+    if (processGroupAlive(pgid)) {
+      winTree.killProcesses(windowsTree(pgid).map((item) => item.pid), { force: true });
+      killSent = true;
+      signals.push("SIGKILL");
+    }
+    const killDeadline = Date.now() + Math.max(500, pollMs * 4);
+    while (processGroupAlive(pgid) && Date.now() < killDeadline) await waitDelay(pollMs);
+    // A member that was mid-CreateProcess when its parent died appears only
+    // after the tree looked empty (POSIX groups don't have this gap). Sweep
+    // twice more so a late child is never left orphaned.
+    for (let sweep = 0; sweep < 2; sweep++) {
+      await waitDelay(300);
+      const late = windowsTree(pgid).map((item) => item.pid);
+      if (!late.length) continue;
+      winTree.killProcesses(late, { force: true });
+      if (!killSent) { killSent = true; signals.push("SIGKILL"); }
+    }
+    return { processGroupId: pgid, termSent, killSent, signals, exited: !processGroupAlive(pgid), graceMs };
+  }
   try { process.kill(-pgid, "SIGTERM"); termSent = true; signals.push("SIGTERM"); } catch {}
   const deadline = Date.now() + graceMs;
   while (processGroupAlive(pgid) && Date.now() < deadline) await waitDelay(Math.min(pollMs, Math.max(1, deadline - Date.now())));
@@ -199,6 +269,7 @@ module.exports = {
   processGroupAlive,
   processGroupRss,
   processIdentity,
+  processTreeMembers,
   resourceGuardConfig,
   terminateOwnedProcessGroup,
   watchOwnedProcessGroupRss,

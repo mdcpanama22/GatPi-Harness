@@ -143,7 +143,14 @@ function stopJob(cwd, jobId) {
   }
   let stopped = false;
   const currentIdentity = processIdentity(job.supervisorPid);
-  if (currentIdentity?.startTime === job.ownership.startTime) {
+  if (currentIdentity?.startTime === job.ownership.startTime && process.platform === "win32") {
+    // process.kill() on Windows terminates the supervisor without running its
+    // handler, orphaning the command tree. Ask it to stop via the stop file.
+    try {
+      fs.writeFileSync(path.join(jobsDir(cwd), `${job.jobId}.stop`), `${new Date().toISOString()}\n`);
+      stopped = true;
+    } catch {}
+  } else if (currentIdentity?.startTime === job.ownership.startTime) {
     try {
       // Signal only the recorded harness-owned supervisor. It forwards SIGTERM
       // to its owned command group and escalates to SIGKILL after the configured

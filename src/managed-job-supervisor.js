@@ -11,6 +11,7 @@ const {
   terminateOwnedProcessGroup,
   watchOwnedProcessGroupRss,
 } = require("./resource-guard.js");
+const { gitBashPath } = require("./win-exec.js");
 
 function writePrivateJson(file, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
@@ -33,10 +34,29 @@ function signalExitCode(signal) {
   return 128 + Number(os.constants.signals?.[signal] || 0);
 }
 
+/** The stop request file for a job (see bg-jobs stopJob). */
+function stopRequestFile(launch) {
+  return String(launch.guardFile).replace(/\.guard\.json$/, ".stop");
+}
+
+/**
+ * The shell that runs the job command. POSIX: sh -c. Windows: Git Bash (the
+ * shell Pi's bash tool uses, so commands mean the same thing), else cmd.exe.
+ */
+function commandShell(command) {
+  if (process.platform !== "win32") return { command: "sh", args: ["-c", command], options: {} };
+  const bash = gitBashPath(process.env);
+  if (bash) return { command: bash, args: ["-c", command], options: {} };
+  return { command: process.env.ComSpec || "cmd.exe", args: ["/d", "/s", "/c", `"${command}"`], options: { windowsVerbatimArguments: true } };
+}
+
 async function supervise(launchFile) {
   const launch = readLaunch(launchFile);
   const config = resourceGuardConfig(launch.resourceGuard || {});
-  const logFd = fs.openSync(launch.logFile, "a", 0o600);
+  // Windows: an append-mode handle lacks FILE_WRITE_DATA, and Git Bash (MSYS)
+  // exits 1 without output when its stdout is such a handle. Each job's log is
+  // a new file, so open it for writing; the shared handle keeps writes ordered.
+  const logFd = fs.openSync(launch.logFile, process.platform === "win32" ? "w" : "a", 0o600);
   let child;
   let ownership;
   let monitor;
@@ -98,17 +118,28 @@ async function supervise(launchFile) {
   const onSignal = () => { void requestTermination("explicit-stop"); };
   process.on("SIGTERM", onSignal);
   process.on("SIGINT", onSignal);
+  // Windows has no SIGTERM delivery: process.kill() terminates the supervisor
+  // outright and its command tree would be orphaned. stopJob writes a stop
+  // request file instead, which the supervisor polls.
+  const stopFile = stopRequestFile(launch);
+  const stopPoll = process.platform === "win32"
+    ? setInterval(() => { if (fs.existsSync(stopFile)) onSignal(); }, 250)
+    : null;
   writeState(true);
 
   try {
     if (stopReason) throw Object.assign(new Error("managed job stopped before launch"), { name: "AbortError" });
-    child = spawn("sh", ["-c", launch.command], {
+    const shell = commandShell(launch.command);
+    const spawnedAt = Date.now();
+    child = spawn(shell.command, shell.args, {
       cwd: launch.cwd,
       detached: true,
       stdio: ["ignore", logFd, logFd],
       env: process.env,
+      windowsHide: true,
+      ...shell.options,
     });
-    ownership = ownProcessGroup(child);
+    ownership = ownProcessGroup(child, { spawnedAt });
     state.commandPid = child.pid;
     state.processGroupId = child.pid;
     state.phase = "running";
@@ -171,6 +202,8 @@ async function supervise(launchFile) {
     finishExit(aborted ? signalExitCode("SIGTERM") : 1);
   } finally {
     monitor?.stop();
+    if (stopPoll) clearInterval(stopPoll);
+    try { fs.rmSync(stopFile, { force: true }); } catch {}
     try { fs.closeSync(logFd); } catch {}
   }
 }

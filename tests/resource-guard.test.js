@@ -49,7 +49,9 @@ setInterval(() => {}, 1000);
   fs.mkdirSync(jobCwd);
   const ordering = path.join(tmp, "ordering.log");
   const guard = { rssLimitMb: 512, rssPollMs: 20, termGraceMs: 60 };
-  const firstJob = startJob(jobCwd, `echo first-start >> "${ordering}"; sleep 0.4; echo first-end >> "${ordering}"`, { resourceGuard: guard });
+  // The first job must outlive the second job's startup; on Windows a job takes
+  // ~0.4 s to start (Node supervisor, Git Bash, a process snapshot).
+  const firstJob = startJob(jobCwd, `echo first-start >> "${ordering}"; sleep 2; echo first-end >> "${ordering}"`, { resourceGuard: guard });
   await waitFor(() => fs.existsSync(ordering) && fs.readFileSync(ordering, "utf8").includes("first-start"));
   const secondJob = startJob(jobCwd, `echo second-start >> "${ordering}"`, { resourceGuard: guard });
   await waitFor(() => fs.readFileSync(ordering, "utf8").includes("second-start"));
